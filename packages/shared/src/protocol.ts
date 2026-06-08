@@ -25,6 +25,10 @@ export const DEFAULT_BANDWIDTH: Record<Mode, number> = {
 /** Audio sample rate produced by the server demodulators. */
 export const AUDIO_RATE = 48_000;
 
+/** ADS-B (Mode S extended squitter) operating point. */
+export const ADSB_FREQ_HZ = 1_090_000_000;
+export const ADSB_SAMPLE_RATE = 2_000_000; // 2 samples per Mode S bit
+
 /** Direct-sampling mode values passed straight to rtl_tcp / librtlsdr. */
 export const DIRECT_SAMPLING = {
   OFF: 0,
@@ -97,11 +101,28 @@ export type ClientMessage =
   | { type: "setBiasTee"; on: boolean }
   | { type: "setDirectSampling"; value: DirectSampling }
   /** VFO offset from the dongle center frequency, in Hz (tune within the band). */
-  | { type: "setVfoOffset"; hz: number };
+  | { type: "setVfoOffset"; hz: number }
+  /** Toggle ADS-B mode: retunes to 1090 MHz @ 2 MSPS and decodes Mode S. */
+  | { type: "setAdsb"; on: boolean };
 
 // ---------------------------------------------------------------------------
 // Server -> Client (JSON status)
 // ---------------------------------------------------------------------------
+
+/** One tracked aircraft from the ADS-B decoder. */
+export interface AircraftReport {
+  /** 24-bit ICAO address, lowercase hex. */
+  icao: string;
+  callsign?: string;
+  altitude?: number; // feet (barometric)
+  lat?: number;
+  lon?: number;
+  speed?: number; // ground speed, knots
+  heading?: number; // track, degrees
+  vertRate?: number; // ft/min
+  messages: number;
+  seen: number; // seconds since last message
+}
 
 export interface DeviceInfo {
   tuner: TunerType;
@@ -123,6 +144,8 @@ export interface RadioState {
   ppm: number;
   biasTee: boolean;
   directSampling: DirectSampling;
+  /** When true the radio is decoding ADS-B (1090 MHz) instead of audio. */
+  adsb: boolean;
 }
 
 export type ServerMessage =
@@ -130,6 +153,8 @@ export type ServerMessage =
   | { type: "state"; state: RadioState }
   /** Channel signal level in dB, for squelch UI / S-meter. */
   | { type: "signal"; channelDb: number; squelchOpen: boolean }
+  /** Periodic ADS-B aircraft table snapshot (only while ADS-B is on). */
+  | { type: "adsb"; aircraft: AircraftReport[]; messageRate: number }
   | { type: "error"; message: string };
 
 // ---------------------------------------------------------------------------
@@ -252,4 +277,5 @@ export const DEFAULT_STATE: RadioState = {
   ppm: 0,
   biasTee: false,
   directSampling: DIRECT_SAMPLING.OFF,
+  adsb: false,
 };

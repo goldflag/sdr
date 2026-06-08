@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  type AircraftReport,
   type AudioFrame,
   type ClientMessage,
   type DeviceInfo,
@@ -29,6 +30,8 @@ export function useRadio() {
   const [state, setState] = useState<RadioState | null>(null);
   const [deviceInfo, setDeviceInfo] = useState<DeviceInfo | null>(null);
   const [signal, setSignal] = useState<SignalState | null>(null);
+  const [aircraft, setAircraft] = useState<AircraftReport[]>([]);
+  const [messageRate, setMessageRate] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -90,6 +93,10 @@ export function useRadio() {
         case "signal":
           setSignal({ channelDb: msg.channelDb, squelchOpen: msg.squelchOpen });
           break;
+        case "adsb":
+          setAircraft(msg.aircraft);
+          setMessageRate(msg.messageRate);
+          break;
         case "error":
           setError(msg.message);
           break;
@@ -129,6 +136,8 @@ export function useRadio() {
     state,
     deviceInfo,
     signal,
+    aircraft,
+    messageRate,
     error,
     send,
     subscribeFft,

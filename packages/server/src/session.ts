@@ -8,9 +8,12 @@ import {
   type Mode,
   type RadioState,
   type ServerMessage,
+  ADSB_FREQ_HZ,
+  ADSB_SAMPLE_RATE,
   AUDIO_RATE,
   DEFAULT_BANDWIDTH,
   DEFAULT_STATE,
+  DIRECT_SAMPLING,
   TUNER_NAME,
   encodeAudioFrame,
   encodeFftFrame,
@@ -20,11 +23,13 @@ import { RtlTcpManager } from "./rtltcp/manager";
 import { RtlTcpClient } from "./rtltcp/client";
 import { SpectrumAnalyzer } from "./dsp/fft";
 import { Demodulator } from "./dsp/demod";
+import { AdsbReceiver } from "./dsp/adsb";
 import { Nco } from "./dsp/nco";
 import { floatToInt16 } from "./dsp/resample";
 
 const FFT_INTERVAL_MS = 50; // ~20 fps
 const FFT_SIZE = 2048;
+const ADSB_BROADCAST_MS = 1000; // aircraft table refresh rate
 
 export interface RadioSinks {
   json: (msg: ServerMessage) => void;
@@ -36,11 +41,19 @@ export class Radio {
   private client: RtlTcpClient | null = null;
   private spectrum = new SpectrumAnalyzer(FFT_SIZE);
   private demod = new Demodulator();
+  private adsb = new AdsbReceiver();
   private vfo = new Nco(DEFAULT_STATE.sampleRate, 0);
   private deviceInfo: DeviceInfo | null = null;
   private state: RadioState = { ...DEFAULT_STATE };
   private lastFft = 0;
   private lastSignal = 0;
+  private lastAdsb = 0;
+  private lastAdsbCount = 0;
+  // Receiver settings saved when entering ADS-B, restored on exit.
+  private preAdsb: Pick<
+    RadioState,
+    "centerHz" | "sampleRate" | "gainMode" | "gainDb" | "directSampling"
+  > | null = null;
   private starting = false;
   private stopping = false;
 
@@ -182,8 +195,73 @@ export class Radio {
         this.state.vfoOffset = msg.hz;
         this.vfo.setFreq(-msg.hz); // bring the VFO down to DC
         break;
+      case "setAdsb":
+        if (msg.on) this.enterAdsb();
+        else this.exitAdsb();
+        break;
     }
     this.broadcastState();
+  }
+
+  /** Retune to 1090 MHz @ 2 MSPS with max gain and start Mode S decoding. */
+  private enterAdsb() {
+    if (this.state.adsb) return;
+    const s = this.state;
+    this.preAdsb = {
+      centerHz: s.centerHz,
+      sampleRate: s.sampleRate,
+      gainMode: s.gainMode,
+      gainDb: s.gainDb,
+      directSampling: s.directSampling,
+    };
+    s.adsb = true;
+    s.centerHz = ADSB_FREQ_HZ;
+    s.sampleRate = ADSB_SAMPLE_RATE;
+    s.directSampling = DIRECT_SAMPLING.OFF;
+    // ADS-B decodes best near max gain.
+    const gains = this.deviceInfo?.gains ?? [];
+    if (gains.length > 0) {
+      s.gainMode = "manual";
+      s.gainDb = gains[gains.length - 1]!;
+    }
+    this.adsb.reset();
+    this.lastAdsb = 0;
+    this.lastAdsbCount = 0;
+    this.applyReceiver();
+  }
+
+  /** Leave ADS-B and restore the previous receiver settings. */
+  private exitAdsb() {
+    if (!this.state.adsb) return;
+    const s = this.state;
+    s.adsb = false;
+    if (this.preAdsb) {
+      s.centerHz = this.preAdsb.centerHz;
+      s.sampleRate = this.preAdsb.sampleRate;
+      s.gainMode = this.preAdsb.gainMode;
+      s.gainDb = this.preAdsb.gainDb;
+      s.directSampling = this.preAdsb.directSampling;
+      this.preAdsb = null;
+    }
+    this.applyReceiver();
+  }
+
+  /** Push center freq / sample rate / gain / direct sampling to the device. */
+  private applyReceiver() {
+    const s = this.state;
+    const c = this.client;
+    this.vfo.setSampleRate(s.sampleRate);
+    this.vfo.setFreq(-s.vfoOffset);
+    this.reconfigureDemod();
+    if (!c) return;
+    c.setSampleRate(s.sampleRate);
+    c.setDirectSampling(s.directSampling);
+    c.setFrequency(s.centerHz);
+    if (s.gainMode === "auto") c.setTunerGainMode(false);
+    else {
+      c.setTunerGainMode(true);
+      c.setGainTenthDb(Math.round(s.gainDb * 10));
+    }
   }
 
   /** Push the full current state to the device (after (re)connect). */
@@ -218,6 +296,25 @@ export class Radio {
   // --- IQ processing ---
 
   private onIq(iq: Float32Array) {
+    if (this.state.adsb) {
+      this.adsb.process(iq);
+      const now = Date.now();
+      if (now - this.lastAdsb >= ADSB_BROADCAST_MS) {
+        const total = this.adsb.totalMessages;
+        const rate = this.lastAdsb
+          ? (total - this.lastAdsbCount) / ((now - this.lastAdsb) / 1000)
+          : 0;
+        this.lastAdsb = now;
+        this.lastAdsbCount = total;
+        this.sinks.json({
+          type: "adsb",
+          aircraft: this.adsb.snapshot(now),
+          messageRate: Math.round(rate),
+        });
+      }
+      return;
+    }
+
     // Spectrum sees the whole captured band (unshifted).
     this.spectrum.push(iq);
     const now = Date.now();

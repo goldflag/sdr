@@ -7,7 +7,11 @@ import { Controls } from "@/components/Controls";
 import { Presets } from "@/components/Presets";
 import { Bookmarks } from "@/components/Bookmarks";
 import { Vfo } from "@/components/Vfo";
-import { Activity, AlertTriangle } from "lucide-react";
+import { AdsbMap } from "@/components/AdsbMap";
+import { AdsbPanel } from "@/components/AdsbPanel";
+import { Activity, AlertTriangle, AudioWaveform, Plane } from "lucide-react";
+
+type View = "spectrum" | "adsb";
 
 export default function App() {
   const radio = useRadio();
@@ -15,8 +19,14 @@ export default function App() {
   if (!playerRef.current) playerRef.current = new PcmPlayer();
   const [audioRunning, setAudioRunning] = useState(false);
   const [volume, setVolume] = useState(0.7);
+  const [view, setView] = useState<View>("spectrum");
 
   const state = radio.state ?? DEFAULT_STATE;
+
+  const switchView = (v: View) => {
+    setView(v);
+    radio.send({ type: "setAdsb", on: v === "adsb" });
+  };
 
   // Pipe audio frames to the player.
   useEffect(
@@ -44,41 +54,102 @@ export default function App() {
       )}
 
       <div className="flex min-h-0 flex-1">
-        {/* Control rail */}
+        {/* Control rail — receiver controls, or ADS-B traffic when in map view */}
         <aside className="scroll-thin w-[320px] shrink-0 overflow-y-auto border-r bg-sidebar">
-          <Presets state={state} send={radio.send} />
-          <Bookmarks state={state} send={radio.send} />
-          <Controls
-            state={state}
-            deviceInfo={radio.deviceInfo}
-            signal={radio.signal}
-            send={radio.send}
-            volume={volume}
-            onVolume={(v) => {
-              setVolume(v);
-              playerRef.current?.setVolume(v);
-            }}
-            audioRunning={audioRunning}
-            onEnableAudio={enableAudio}
-          />
+          {view === "adsb" ? (
+            <AdsbPanel
+              aircraft={radio.aircraft}
+              messageRate={radio.messageRate}
+            />
+          ) : (
+            <>
+              <Presets state={state} send={radio.send} />
+              <Bookmarks state={state} send={radio.send} />
+              <Controls
+                state={state}
+                deviceInfo={radio.deviceInfo}
+                signal={radio.signal}
+                send={radio.send}
+                volume={volume}
+                onVolume={(v) => {
+                  setVolume(v);
+                  playerRef.current?.setVolume(v);
+                }}
+                audioRunning={audioRunning}
+                onEnableAudio={enableAudio}
+              />
+            </>
+          )}
         </aside>
 
-        {/* Main column: tuning bar + spectrum/waterfall */}
+        {/* Main column: view tabs + spectrum/waterfall or live ADS-B map */}
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="border-b px-4 py-2.5">
-            <Vfo state={state} send={radio.send} />
+          <div className="flex items-center gap-3 border-b px-4 py-2">
+            <ViewTabs view={view} onChange={switchView} />
+            {view === "adsb" && (
+              <span className="font-mono text-[11px] text-muted-foreground">
+                {radio.aircraft.length} aircraft · {radio.messageRate} msg/s
+              </span>
+            )}
           </div>
-          <div className="min-h-0 flex-1 p-4">
-            <SpectrumWaterfall
-              subscribeFft={radio.subscribeFft}
-              state={state}
-              onTune={(hz) => radio.send({ type: "setVfoOffset", hz })}
-            />
-          </div>
+          {view === "spectrum" ? (
+            <>
+              <div className="border-b px-4 py-2.5">
+                <Vfo state={state} send={radio.send} />
+              </div>
+              <div className="min-h-0 flex-1 p-4">
+                <SpectrumWaterfall
+                  subscribeFft={radio.subscribeFft}
+                  state={state}
+                  onTune={(hz) => radio.send({ type: "setVfoOffset", hz })}
+                />
+              </div>
+            </>
+          ) : (
+            <div className="min-h-0 flex-1">
+              <AdsbMap aircraft={radio.aircraft} />
+            </div>
+          )}
         </main>
       </div>
 
-      <StatusBar state={state} audioRunning={audioRunning} />
+      <StatusBar state={state} audioRunning={audioRunning} view={view} />
+    </div>
+  );
+}
+
+function ViewTabs({
+  view,
+  onChange,
+}: {
+  view: View;
+  onChange: (v: View) => void;
+}) {
+  const tabs: { id: View; label: string; icon: typeof Plane }[] = [
+    { id: "spectrum", label: "Spectrum", icon: AudioWaveform },
+    { id: "adsb", label: "ADS-B Map", icon: Plane },
+  ];
+  return (
+    <div className="flex items-center gap-0.5 rounded-md bg-muted/50 p-0.5">
+      {tabs.map((t) => {
+        const Icon = t.icon;
+        const active = view === t.id;
+        return (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => onChange(t.id)}
+            className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+              active
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Icon className="size-3.5" />
+            {t.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -86,19 +157,32 @@ export default function App() {
 function StatusBar({
   state,
   audioRunning,
+  view,
 }: {
   state: RadioState;
   audioRunning: boolean;
+  view: View;
 }) {
   return (
     <footer className="flex items-center justify-between gap-4 border-t bg-sidebar px-5 py-1.5 font-mono text-[11px] text-muted-foreground">
       <span className="flex items-center gap-1.5">
         <Activity className="size-3 text-primary" />
-        Click the spectrum to tune · scroll a digit to nudge · click it to type
+        {view === "adsb"
+          ? "Decoding Mode S extended squitter at 1090 MHz · markers update live"
+          : "Click the spectrum to tune · scroll a digit to nudge · click it to type"}
       </span>
       <div className="flex items-center gap-4">
-        <Stat label="MODE" value={state.mode} />
-        <Stat label="BW" value={`${(state.bandwidth / 1000).toFixed(1)}k`} />
+        {view === "adsb" ? (
+          <Stat label="FREQ" value="1090.000M" />
+        ) : (
+          <>
+            <Stat label="MODE" value={state.mode} />
+            <Stat
+              label="BW"
+              value={`${(state.bandwidth / 1000).toFixed(1)}k`}
+            />
+          </>
+        )}
         <Stat label="SR" value={`${(state.sampleRate / 1e6).toFixed(3)}M`} />
         <Stat
           label="GAIN"
@@ -106,7 +190,9 @@ function StatusBar({
             state.gainMode === "auto" ? "AUTO" : `${state.gainDb.toFixed(0)}dB`
           }
         />
-        <Stat label="AUDIO" value={audioRunning ? "ON" : "OFF"} />
+        {view === "spectrum" && (
+          <Stat label="AUDIO" value={audioRunning ? "ON" : "OFF"} />
+        )}
       </div>
     </footer>
   );
