@@ -1,0 +1,13 @@
+{
+  "name": "@sdr/shared",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "echo 'shared: type-only, nothing to build'",
+    "dev": "echo 'shared: type-only'"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "sdr",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev": "bun --filter '*' dev",
+    "dev:server": "bun --filter '@sdr/server' dev",
+    "dev:web": "bun --filter '@sdr/web' dev",
+    "build": "bun --filter '*' build",
+    "typecheck": "bun --filter '*' typecheck"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14"
+  }
+}

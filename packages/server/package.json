@@ -1,0 +1,19 @@
+{
+  "name": "@sdr/server",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch run src/index.ts",
+    "start": "bun run src/index.ts",
+    "build": "bun build src/index.ts --target=bun --outdir dist",
+    "typecheck": "tsc --noEmit",
+    "test:dsp": "bun run src/dsp/selftest.ts"
+  },
+  "dependencies": {
+    "@sdr/shared": "workspace:*",
+    "fft.js": "^4.0.4"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
