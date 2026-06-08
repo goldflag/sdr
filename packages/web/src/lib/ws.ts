@@ -85,6 +85,7 @@ export function useRadio() {
           break;
         case "deviceInfo":
           setDeviceInfo(msg.info);
+          setError(null); // a successful (re)connect clears any stale error
           break;
         case "signal":
           setSignal({ channelDb: msg.channelDb, squelchOpen: msg.squelchOpen });

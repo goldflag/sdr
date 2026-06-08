@@ -42,6 +42,7 @@ export class Radio {
   private lastFft = 0;
   private lastSignal = 0;
   private starting = false;
+  private stopping = false;
 
   constructor(private sinks: RadioSinks) {
     this.manager = new RtlTcpManager();
@@ -53,7 +54,11 @@ export class Radio {
         this.deviceInfo = null;
         this.state.running = false;
         this.starting = false;
-        this.sinks.json({ type: "error", message: e.reason });
+        // Don't surface an error for a stop we initiated (e.g. last client left).
+        if (!this.stopping) {
+          this.sinks.json({ type: "error", message: e.reason });
+        }
+        this.stopping = false;
         this.broadcastState();
       }
     });
@@ -76,6 +81,7 @@ export class Radio {
   }
 
   stop() {
+    this.stopping = true;
     this.client?.close();
     this.client = null;
     this.manager.stop();

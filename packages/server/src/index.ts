@@ -12,6 +12,10 @@ const TOPIC = "radio";
 
 let server: Server<undefined>;
 let clientCount = 0;
+let stopTimer: ReturnType<typeof setTimeout> | null = null;
+// Grace period before stopping the dongle once the last client leaves — rides
+// out React StrictMode remounts and page reloads without thrashing rtl_tcp.
+const STOP_GRACE_MS = 2500;
 
 const radio = new Radio({
   json: (msg) => server?.publish(TOPIC, JSON.stringify(msg)),
@@ -40,11 +44,16 @@ server = Bun.serve({
     open(ws: ServerWebSocket<undefined>) {
       ws.subscribe(TOPIC);
       clientCount++;
+      // A client returned within the grace period — cancel any pending stop.
+      if (stopTimer) {
+        clearTimeout(stopTimer);
+        stopTimer = null;
+      }
       // Sync the newcomer with current state, then ensure the radio is running.
       const info = radio.getDeviceInfo();
       if (info) ws.send(JSON.stringify({ type: "deviceInfo", info }));
       ws.send(JSON.stringify({ type: "state", state: radio.getState() }));
-      if (clientCount === 1) void radio.start();
+      void radio.start(); // idempotent if already running/starting
     },
     message(_ws, message) {
       if (typeof message !== "string") return;
@@ -59,7 +68,12 @@ server = Bun.serve({
     close(ws: ServerWebSocket<undefined>) {
       ws.unsubscribe(TOPIC);
       clientCount = Math.max(0, clientCount - 1);
-      if (clientCount === 0) radio.stop();
+      if (clientCount === 0 && !stopTimer) {
+        stopTimer = setTimeout(() => {
+          stopTimer = null;
+          if (clientCount === 0) radio.stop();
+        }, STOP_GRACE_MS);
+      }
     },
   },
 });
