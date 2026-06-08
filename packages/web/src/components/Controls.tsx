@@ -243,7 +243,7 @@ export function Controls(p: Props) {
 
 // --- panel primitives ------------------------------------------------------
 
-function Section({
+export function Section({
   title,
   aside,
   children,
@@ -269,7 +269,7 @@ function Section({
   );
 }
 
-function Field({
+export function Field({
   label,
   value,
   hint,

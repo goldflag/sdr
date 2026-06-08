@@ -4,6 +4,8 @@ import { useRadio } from "@/lib/ws";
 import { PcmPlayer } from "@/audio/pcm-player";
 import { SpectrumWaterfall } from "@/components/SpectrumWaterfall";
 import { Controls } from "@/components/Controls";
+import { Presets } from "@/components/Presets";
+import { Bookmarks } from "@/components/Bookmarks";
 import { Vfo } from "@/components/Vfo";
 import { Activity, AlertTriangle } from "lucide-react";
 
@@ -44,6 +46,8 @@ export default function App() {
       <div className="flex min-h-0 flex-1">
         {/* Control rail */}
         <aside className="scroll-thin w-[320px] shrink-0 overflow-y-auto border-r bg-sidebar">
+          <Presets state={state} send={radio.send} />
+          <Bookmarks state={state} send={radio.send} />
           <Controls
             state={state}
             deviceInfo={radio.deviceInfo}
