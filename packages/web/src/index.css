@@ -1,29 +1,45 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/inter";
 
 @custom-variant dark (&:is(.dark *));
 
 /* Dark technical theme tuned for a spectrum/waterfall UI. */
 :root {
-  --radius: 0.5rem;
-  --background: oklch(0.16 0.005 250);
-  --foreground: oklch(0.92 0.01 250);
-  --card: oklch(0.19 0.006 250);
-  --card-foreground: oklch(0.92 0.01 250);
-  --popover: oklch(0.19 0.006 250);
-  --popover-foreground: oklch(0.92 0.01 250);
-  --primary: oklch(0.72 0.16 160);
-  --primary-foreground: oklch(0.16 0.02 160);
-  --secondary: oklch(0.26 0.008 250);
-  --secondary-foreground: oklch(0.92 0.01 250);
-  --muted: oklch(0.24 0.006 250);
-  --muted-foreground: oklch(0.62 0.01 250);
-  --accent: oklch(0.28 0.01 250);
-  --accent-foreground: oklch(0.95 0.01 250);
-  --destructive: oklch(0.62 0.2 25);
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.457 0.24 277.023);
+  --primary-foreground: oklch(0.962 0.018 272.314);
+  --secondary: oklch(0.967 0.001 286.375);
+  --secondary-foreground: oklch(0.21 0.006 285.885);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.98 0.01 25);
-  --border: oklch(0.3 0.008 250);
-  --input: oklch(0.3 0.008 250);
-  --ring: oklch(0.72 0.16 160);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.511 0.262 276.966);
+  --sidebar-primary-foreground: oklch(0.962 0.018 272.314);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
 }
 
 @theme inline {
@@ -50,17 +66,116 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --font-heading: var(--font-sans);
+  --font-sans: 'Inter Variable', sans-serif;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-* {
-  border-color: var(--color-border);
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.398 0.195 277.366);
+  --primary-foreground: oklch(0.962 0.018 272.314);
+  --secondary: oklch(0.274 0.006 286.033);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.585 0.233 277.117);
+  --sidebar-primary-foreground: oklch(0.962 0.018 272.314);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
 }
 
-body {
-  margin: 0;
-  background: var(--color-background);
-  color: var(--color-foreground);
-  font-family:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  -webkit-font-smoothing: antialiased;
+/* ---------------------------------------------------------------------------
+ * Spectrum / waterfall data palette. Deliberately its own palette, not the UI
+ * accent: the trace and waterfall encode signal strength (a data dimension),
+ * while violet is reserved for UI chrome. The VFO marker is the one bridge —
+ * it uses the brand indigo so "where you're tuned" reads as an app concept.
+ * Read by SpectrumWaterfall via getComputedStyle.
+ * ------------------------------------------------------------------------- */
+:root {
+  --screen: oklch(0.16 0.004 277);
+  --screen-grid: oklch(1 0 0 / 7%);
+  --trace: oklch(0.82 0.17 162);
+  --trace-fill: oklch(0.82 0.17 162 / 16%);
+  --vfo: oklch(0.74 0.16 282);
+  --vfo-fill: oklch(0.74 0.16 282 / 12%);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+  }
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  /* Stable, table-aligned numerics everywhere readouts appear. */
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1, "zero" 1;
+  }
+}
+
+/* Thin, recessed scrollbar for the dense control rail — instrument-panel feel,
+ * not a decorative custom scrollbar. */
+@layer utilities {
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .scroll-thin::-webkit-scrollbar {
+    width: 8px;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border: 2px solid transparent;
+    background-clip: content-box;
+    border-radius: 9999px;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-foreground);
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
 }

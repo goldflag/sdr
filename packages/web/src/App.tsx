@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { DEFAULT_STATE } from "@sdr/shared";
+import { DEFAULT_STATE, type RadioState } from "@sdr/shared";
 import { useRadio } from "@/lib/ws";
 import { PcmPlayer } from "@/audio/pcm-player";
 import { SpectrumWaterfall } from "@/components/SpectrumWaterfall";
 import { Controls } from "@/components/Controls";
 import { Vfo } from "@/components/Vfo";
-import { Card, CardContent } from "@/components/ui/card";
-import { Wifi, WifiOff, AlertTriangle } from "lucide-react";
+import { Activity, Radio, AlertTriangle } from "lucide-react";
 
 export default function App() {
   const radio = useRadio();
@@ -35,38 +34,32 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen flex-col bg-background text-foreground">
-      <Header connected={radio.connected} device={radio.deviceInfo?.tunerName} />
+    <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
+      <TopBar connected={radio.connected} device={radio.deviceInfo?.tunerName} />
 
       {radio.error && (
-        <div className="flex items-center gap-2 border-b border-destructive/30 bg-destructive/10 px-4 py-1.5 text-xs text-destructive">
-          <AlertTriangle className="size-3.5" /> {radio.error}
+        <div className="flex items-center gap-2 border-b border-destructive/30 bg-destructive/10 px-5 py-1.5 text-xs text-destructive">
+          <AlertTriangle className="size-3.5 shrink-0" /> {radio.error}
         </div>
       )}
 
-      <div className="grid flex-1 grid-cols-[1fr_340px] gap-3 overflow-hidden p-3">
-        {/* Main column: VFO + spectrum/waterfall */}
-        <div className="flex min-w-0 flex-col gap-3">
-          <Card>
-            <CardContent className="p-4">
-              <Vfo
-                state={state}
-                onSetCenter={(hz) => radio.send({ type: "setFrequency", hz })}
-                onSetOffset={(hz) => radio.send({ type: "setVfoOffset", hz })}
-              />
-            </CardContent>
-          </Card>
-          <div className="min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1">
+        {/* Main column: tuning bar + spectrum/waterfall */}
+        <main className="flex min-w-0 flex-1 flex-col">
+          <div className="border-b px-5 py-4">
+            <Vfo state={state} send={radio.send} />
+          </div>
+          <div className="min-h-0 flex-1 p-4">
             <SpectrumWaterfall
               subscribeFft={radio.subscribeFft}
               state={state}
               onTune={(hz) => radio.send({ type: "setVfoOffset", hz })}
             />
           </div>
-        </div>
+        </main>
 
-        {/* Sidebar: controls */}
-        <div className="overflow-y-auto pr-1">
+        {/* Control rail */}
+        <aside className="scroll-thin w-[320px] shrink-0 overflow-y-auto border-l bg-sidebar">
           <Controls
             state={state}
             deviceInfo={radio.deviceInfo}
@@ -80,38 +73,81 @@ export default function App() {
             audioRunning={audioRunning}
             onEnableAudio={enableAudio}
           />
-        </div>
+        </aside>
       </div>
+
+      <StatusBar state={state} audioRunning={audioRunning} />
     </div>
   );
 }
 
-function Header({
-  connected,
-  device,
-}: {
-  connected: boolean;
-  device?: string;
-}) {
+function TopBar({ connected, device }: { connected: boolean; device?: string }) {
   return (
-    <header className="flex items-center justify-between border-b px-4 py-2.5">
-      <div className="flex items-baseline gap-2">
+    <header className="flex items-center justify-between border-b px-5 py-2.5">
+      <div className="flex items-center gap-2.5">
+        <Radio className="size-4 text-primary" />
         <span className="text-sm font-semibold tracking-tight">SDR</span>
-        <span className="text-xs text-muted-foreground">RTL-SDR Blog V3</span>
+        <span className="font-mono text-xs text-muted-foreground">
+          RTL-SDR Blog V3
+        </span>
       </div>
-      <div className="flex items-center gap-3 text-xs">
-        {device && <span className="text-muted-foreground">{device}</span>}
+      <div className="flex items-center gap-4 text-xs">
+        {device && (
+          <span className="font-mono text-muted-foreground">{device}</span>
+        )}
         <span
-          className={`flex items-center gap-1.5 ${connected ? "text-primary" : "text-muted-foreground"}`}
+          className={`flex items-center gap-1.5 font-medium ${
+            connected ? "text-primary" : "text-muted-foreground"
+          }`}
         >
-          {connected ? (
-            <Wifi className="size-3.5" />
-          ) : (
-            <WifiOff className="size-3.5" />
-          )}
-          {connected ? "connected" : "offline"}
+          <span
+            className={`size-1.5 rounded-full ${
+              connected
+                ? "bg-primary shadow-[0_0_6px_var(--primary)]"
+                : "bg-muted-foreground/40"
+            }`}
+          />
+          {connected ? "Connected" : "Offline"}
         </span>
       </div>
     </header>
+  );
+}
+
+function StatusBar({
+  state,
+  audioRunning,
+}: {
+  state: RadioState;
+  audioRunning: boolean;
+}) {
+  return (
+    <footer className="flex items-center justify-between gap-4 border-t bg-sidebar px-5 py-1.5 font-mono text-[11px] text-muted-foreground">
+      <span className="flex items-center gap-1.5">
+        <Activity className="size-3 text-primary" />
+        Click the spectrum to tune · scroll a digit to nudge · click it to type
+      </span>
+      <div className="flex items-center gap-4">
+        <Stat label="MODE" value={state.mode} />
+        <Stat label="BW" value={`${(state.bandwidth / 1000).toFixed(1)}k`} />
+        <Stat label="SR" value={`${(state.sampleRate / 1e6).toFixed(3)}M`} />
+        <Stat
+          label="GAIN"
+          value={
+            state.gainMode === "auto" ? "AUTO" : `${state.gainDb.toFixed(0)}dB`
+          }
+        />
+        <Stat label="AUDIO" value={audioRunning ? "ON" : "OFF"} />
+      </div>
+    </footer>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="text-muted-foreground/55">{label}</span>
+      <span className="text-foreground/80">{value}</span>
+    </span>
   );
 }

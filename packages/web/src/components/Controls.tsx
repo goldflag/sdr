@@ -5,15 +5,11 @@ import {
   type Mode,
   type RadioState,
   DIRECT_SAMPLING,
-  LIMITS,
-  MODES,
   SAMPLE_RATES,
 } from "@sdr/shared";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   Select,
   SelectContent,
@@ -21,8 +17,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
 import type { SignalState } from "@/lib/ws";
-import { Volume2, Radio as RadioIcon } from "lucide-react";
+import { Volume2, Power, AlertTriangle } from "lucide-react";
 
 interface Props {
   state: RadioState;
@@ -49,46 +46,72 @@ export function Controls(p: Props) {
   const { state, deviceInfo, signal, send } = p;
   const gains = deviceInfo?.gains ?? [];
   const [bwMin, bwMax, bwStep] = BW_RANGE[state.mode];
+  const squelchOn = state.squelchDb != null;
 
   return (
-    <div className="flex flex-col gap-3">
-      {/* Mode + S-meter */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Mode</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <ToggleGroup
-            type="single"
-            value={state.mode}
-            onValueChange={(v) => v && send({ type: "setMode", mode: v as Mode })}
-            className="flex-wrap"
-          >
-            {MODES.map((m) => (
-              <ToggleGroupItem key={m} value={m}>
-                {m}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-          <SMeter signal={signal} />
-        </CardContent>
-      </Card>
+    <div className="flex flex-col">
+      <Section title="Signal">
+        <SMeter signal={signal} />
+      </Section>
 
-      {/* Audio */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Audio</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          {!p.audioRunning && (
-            <button
-              onClick={p.onEnableAudio}
-              className="flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-            >
-              <Volume2 className="size-4" /> Enable audio
-            </button>
+      <Section title="Channel">
+        <Field
+          label="Bandwidth"
+          value={`${(state.bandwidth / 1000).toFixed(state.bandwidth < 10_000 ? 2 : 1)} kHz`}
+        >
+          <Slider
+            value={[state.bandwidth]}
+            min={bwMin}
+            max={bwMax}
+            step={bwStep}
+            onValueChange={([v]) =>
+              v != null && send({ type: "setBandwidth", hz: v })
+            }
+          />
+        </Field>
+
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <Label className="flex items-center gap-2">
+              Squelch
+              <span
+                className={`size-1.5 rounded-full transition-colors ${
+                  signal?.squelchOpen
+                    ? "bg-primary shadow-[0_0_6px_var(--primary)]"
+                    : "bg-muted-foreground/30"
+                }`}
+                title={signal?.squelchOpen ? "open" : "closed"}
+              />
+            </Label>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-xs text-muted-foreground">
+                {squelchOn ? `${state.squelchDb!.toFixed(0)} dB` : "off"}
+              </span>
+              <Switch
+                checked={squelchOn}
+                onCheckedChange={(on) =>
+                  send({ type: "setSquelch", db: on ? -40 : null })
+                }
+              />
+            </div>
+          </div>
+          {squelchOn && (
+            <Slider
+              value={[state.squelchDb!]}
+              min={-90}
+              max={0}
+              step={1}
+              onValueChange={([v]) =>
+                v != null && send({ type: "setSquelch", db: v })
+              }
+            />
           )}
-          <Row label={`Volume ${Math.round(p.volume * 100)}%`}>
+        </div>
+      </Section>
+
+      <Section title="Audio">
+        {p.audioRunning ? (
+          <Field label="Volume" value={`${Math.round(p.volume * 100)}%`}>
             <Slider
               value={[p.volume]}
               min={0}
@@ -96,210 +119,232 @@ export function Controls(p: Props) {
               step={0.01}
               onValueChange={([v]) => p.onVolume(v ?? 0)}
             />
-          </Row>
-          <Row label={`Bandwidth ${(state.bandwidth / 1000).toFixed(1)} kHz`}>
-            <Slider
-              value={[state.bandwidth]}
-              min={bwMin}
-              max={bwMax}
-              step={bwStep}
-              onValueChange={([v]) =>
-                v != null && send({ type: "setBandwidth", hz: v })
-              }
-            />
-          </Row>
-          <SquelchRow state={state} signal={signal} send={send} />
-        </CardContent>
-      </Card>
+          </Field>
+        ) : (
+          <Button onClick={p.onEnableAudio} className="w-full" size="lg">
+            <Volume2 /> Enable audio output
+          </Button>
+        )}
+      </Section>
 
-      {/* Gain */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Gain</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <div className="flex items-center justify-between">
-            <Label>Auto (tuner AGC)</Label>
+      <Section title="Gain">
+        <div className="flex items-center justify-between">
+          <Label>Tuner AGC</Label>
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-xs text-muted-foreground">
+              {state.gainMode === "auto" ? "auto" : "manual"}
+            </span>
             <Switch
               checked={state.gainMode === "auto"}
               onCheckedChange={(on) =>
-                send({ type: "setGain", mode: on ? "auto" : "manual", db: state.gainDb })
-              }
-            />
-          </div>
-          {state.gainMode === "manual" && gains.length > 0 && (
-            <Row label={`Manual gain ${state.gainDb.toFixed(1)} dB`}>
-              <Slider
-                value={[nearestGainIndex(gains, state.gainDb)]}
-                min={0}
-                max={gains.length - 1}
-                step={1}
-                onValueChange={([i]) =>
-                  i != null &&
-                  send({ type: "setGain", mode: "manual", db: gains[i]! })
-                }
-              />
-            </Row>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Device */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Device — {deviceInfo?.tunerName ?? "no dongle"}</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <Row label="Sample rate">
-            <Select
-              value={String(state.sampleRate)}
-              onValueChange={(v) => send({ type: "setSampleRate", hz: Number(v) })}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {SAMPLE_RATES.map((r) => (
-                  <SelectItem key={r} value={String(r)}>
-                    {(r / 1e6).toFixed(3)} MSPS
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Row>
-          <Row label="Direct sampling (HF below 24 MHz)">
-            <Select
-              value={String(state.directSampling)}
-              onValueChange={(v) =>
                 send({
-                  type: "setDirectSampling",
-                  value: Number(v) as 0 | 1 | 2,
+                  type: "setGain",
+                  mode: on ? "auto" : "manual",
+                  db: state.gainDb,
                 })
               }
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={String(DIRECT_SAMPLING.OFF)}>
-                  Off (VHF/UHF)
-                </SelectItem>
-                <SelectItem value={String(DIRECT_SAMPLING.Q_BRANCH)}>
-                  Q-branch (HF)
-                </SelectItem>
-                <SelectItem value={String(DIRECT_SAMPLING.I_BRANCH)}>
-                  I-branch
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </Row>
-          <Row label={`Frequency correction ${state.ppm} ppm`}>
-            <Slider
-              value={[state.ppm]}
-              min={-100}
-              max={100}
-              step={1}
-              onValueChange={([v]) => v != null && send({ type: "setPpm", ppm: v })}
-            />
-          </Row>
-          <div className="flex items-center justify-between">
-            <Label className="flex items-center gap-1.5">
-              <RadioIcon className="size-3.5" /> Bias tee (4.5V)
-            </Label>
-            <Switch
-              checked={state.biasTee}
-              onCheckedChange={(on) => send({ type: "setBiasTee", on })}
             />
           </div>
-          {state.biasTee && (
-            <p className="text-[11px] text-destructive">
-              ⚠ 4.5V on the antenna port — only with a compatible LNA/antenna.
-            </p>
-          )}
-        </CardContent>
-      </Card>
+        </div>
+        {state.gainMode === "manual" && gains.length > 0 && (
+          <Field label="Gain" value={`${state.gainDb.toFixed(1)} dB`}>
+            <Slider
+              value={[nearestGainIndex(gains, state.gainDb)]}
+              min={0}
+              max={gains.length - 1}
+              step={1}
+              onValueChange={([i]) =>
+                i != null && send({ type: "setGain", mode: "manual", db: gains[i]! })
+              }
+            />
+          </Field>
+        )}
+        {state.gainMode === "manual" && gains.length === 0 && (
+          <p className="text-xs text-muted-foreground">
+            Gain steps unavailable until a tuner is detected.
+          </p>
+        )}
+      </Section>
 
-      <p className="px-1 text-[11px] text-muted-foreground">
-        Tunable {(LIMITS.MIN_HZ / 1e6).toFixed(1)}–
-        {(LIMITS.MAX_HZ / 1e6).toFixed(0)} MHz · click the spectrum to set the
-        VFO · scroll the digits to tune.
-      </p>
+      <Section
+        title="Device"
+        aside={deviceInfo?.tunerName ?? "no dongle"}
+      >
+        <Field label="Sample rate">
+          <Select
+            value={String(state.sampleRate)}
+            onValueChange={(v) => send({ type: "setSampleRate", hz: Number(v) })}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SAMPLE_RATES.map((r) => (
+                <SelectItem key={r} value={String(r)}>
+                  {(r / 1e6).toFixed(3)} MSPS
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+
+        <Field label="Direct sampling" hint="HF reception below ~24 MHz">
+          <Select
+            value={String(state.directSampling)}
+            onValueChange={(v) =>
+              send({ type: "setDirectSampling", value: Number(v) as 0 | 1 | 2 })
+            }
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={String(DIRECT_SAMPLING.OFF)}>
+                Off — VHF / UHF
+              </SelectItem>
+              <SelectItem value={String(DIRECT_SAMPLING.Q_BRANCH)}>
+                Q-branch — HF
+              </SelectItem>
+              <SelectItem value={String(DIRECT_SAMPLING.I_BRANCH)}>
+                I-branch
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+
+        <Field label="Frequency correction" value={`${state.ppm} ppm`}>
+          <Slider
+            value={[state.ppm]}
+            min={-100}
+            max={100}
+            step={1}
+            onValueChange={([v]) => v != null && send({ type: "setPpm", ppm: v })}
+          />
+        </Field>
+
+        <div className="flex items-center justify-between">
+          <Label>Bias tee (4.5 V)</Label>
+          <Switch
+            checked={state.biasTee}
+            onCheckedChange={(on) => send({ type: "setBiasTee", on })}
+          />
+        </div>
+        {state.biasTee && (
+          <p className="flex items-start gap-1.5 text-xs text-destructive">
+            <AlertTriangle className="mt-px size-3.5 shrink-0" />
+            4.5 V is on the antenna port. Use only with a compatible powered LNA
+            or antenna.
+          </p>
+        )}
+      </Section>
     </div>
   );
 }
 
-function Row({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <Label>{label}</Label>
-      {children}
-    </div>
-  );
-}
+// --- panel primitives ------------------------------------------------------
 
-function SquelchRow({
-  state,
-  signal,
-  send,
+function Section({
+  title,
+  aside,
+  children,
 }: {
-  state: RadioState;
-  signal: SignalState | null;
-  send: (m: ClientMessage) => void;
+  title: string;
+  aside?: string;
+  children: ReactNode;
 }) {
-  const enabled = state.squelchDb != null;
+  return (
+    <section className="flex flex-col gap-3 border-b border-border/60 px-4 py-4 last:border-b-0">
+      <div className="flex items-baseline justify-between">
+        <h2 className="text-xs font-semibold tracking-wide text-foreground/80">
+          {title}
+        </h2>
+        {aside && (
+          <span className="font-mono text-[11px] text-muted-foreground">
+            {aside}
+          </span>
+        )}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function Field({
+  label,
+  value,
+  hint,
+  children,
+}: {
+  label: string;
+  value?: string;
+  hint?: string;
+  children: ReactNode;
+}) {
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="flex items-center justify-between">
-        <Label>
-          Squelch{" "}
-          {enabled ? `${state.squelchDb!.toFixed(0)} dB` : "off"}
-          {signal && (
-            <span
-              className={`ml-2 ${signal.squelchOpen ? "text-primary" : "text-muted-foreground/50"}`}
-            >
-              ●
-            </span>
-          )}
-        </Label>
-        <Switch
-          checked={enabled}
-          onCheckedChange={(on) =>
-            send({ type: "setSquelch", db: on ? -40 : null })
-          }
-        />
+      <div className="flex items-baseline justify-between">
+        <Label>{label}</Label>
+        {value && (
+          <span className="font-mono text-xs text-foreground/70">{value}</span>
+        )}
       </div>
-      {enabled && (
-        <Slider
-          value={[state.squelchDb!]}
-          min={-90}
-          max={0}
-          step={1}
-          onValueChange={([v]) =>
-            v != null && send({ type: "setSquelch", db: v })
-          }
-        />
-      )}
+      {children}
+      {hint && <p className="text-[11px] text-muted-foreground">{hint}</p>}
     </div>
   );
 }
+
+// --- segmented S-meter -----------------------------------------------------
+
+const SEG_COUNT = 22;
 
 function SMeter({ signal }: { signal: SignalState | null }) {
-  const db = signal?.channelDb ?? -90;
-  const pct = Math.min(100, Math.max(0, ((db + 90) / 90) * 100));
+  const db = signal?.channelDb ?? -120;
+  // Map roughly -110..-10 dB of channel power onto the meter.
+  const frac = clamp01((db + 110) / 100);
+  const lit = Math.round(frac * SEG_COUNT);
+
   return (
-    <div className="flex items-center gap-2">
-      <span className="w-8 font-mono text-[10px] text-muted-foreground">S</span>
-      <div className="h-2 flex-1 overflow-hidden rounded-full bg-secondary">
-        <div
-          className="h-full rounded-full bg-gradient-to-r from-primary/70 to-primary transition-[width] duration-100"
-          style={{ width: `${pct}%` }}
-        />
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-end gap-3">
+        <div className="flex h-7 flex-1 items-stretch gap-px">
+          {Array.from({ length: SEG_COUNT }, (_, i) => {
+            const on = i < lit;
+            // Top fifth of the scale reads "strong" in warm amber.
+            const hot = i >= SEG_COUNT - 5;
+            return (
+              <span
+                key={i}
+                className={
+                  on
+                    ? hot
+                      ? "flex-1 bg-[oklch(0.78_0.16_70)]"
+                      : "flex-1 bg-primary"
+                    : "flex-1 bg-muted"
+                }
+              />
+            );
+          })}
+        </div>
+        <span className="w-16 text-right font-mono text-sm tabular-nums text-foreground">
+          {signal ? `${db.toFixed(0)}` : "––"}
+          <span className="ml-1 text-xs text-muted-foreground">dB</span>
+        </span>
       </div>
-      <span className="w-14 text-right font-mono text-[10px] text-muted-foreground">
-        {db.toFixed(0)} dB
-      </span>
+      <div className="flex justify-between px-px font-mono text-[10px] text-muted-foreground/70">
+        <span>S1</span>
+        <span>S5</span>
+        <span>S9</span>
+        <span className="text-[oklch(0.78_0.16_70)]/70">+20</span>
+      </div>
     </div>
   );
+}
+
+// --- helpers ---------------------------------------------------------------
+
+function clamp01(x: number): number {
+  return Math.min(1, Math.max(0, x));
 }
 
 function nearestGainIndex(gains: number[], db: number): number {
