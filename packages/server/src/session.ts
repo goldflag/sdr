@@ -199,6 +199,9 @@ export class Radio {
         if (msg.on) this.enterAdsb();
         else this.exitAdsb();
         break;
+      case "setAdsbRef":
+        this.adsb.setRef(msg.lat, msg.lon);
+        break;
     }
     this.broadcastState();
   }

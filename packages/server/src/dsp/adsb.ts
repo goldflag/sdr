@@ -1,13 +1,18 @@
 // ADS-B (1090 MHz Mode S) receiver. Ported from the classic dump1090 2 MHz
 // demodulator: magnitude detect -> preamble search -> Manchester bit slice ->
-// 24-bit Mode S CRC. Only DF17/DF18 extended-squitter frames are decoded (these
-// carry the ADS-B identification, airborne position and velocity and have a
-// zero CRC residual, so no address-overlay recovery is needed).
+// 24-bit Mode S CRC (with single-bit error correction). Only DF17/DF18
+// extended-squitter frames are decoded — these carry the ADS-B identification,
+// airborne position and velocity and have a zero CRC residual, so no
+// address-overlay recovery is needed.
 //
 // Input is interleaved complex IQ at 2.0 MSPS (2 samples per Mode S bit),
 // already at the dongle center (no VFO shift — ADS-B fills the whole 2 MHz span
 // around 1090 MHz). The receiver maintains an aircraft table keyed by ICAO
 // address; the session polls snapshot() periodically to broadcast it.
+//
+// Position decoding uses globally-unambiguous even/odd CPR by default, or a
+// single-frame *local* CPR solution when a receiver reference position is set
+// (faster first fix; works for aircraft heard only briefly).
 
 import type { AircraftReport } from "@sdr/shared";
 
@@ -28,6 +33,19 @@ const CRC_POLY = [
 const IDENT_CHARS =
   "#ABCDEFGHIJKLMNOPQRSTUVWXYZ#####" + " ###############0123456789######";
 
+// Single-bit error-correction table: syndrome (CRC residual produced by a lone
+// set bit) -> bit index. A frame with residual R is corrected by flipping the
+// bit whose syndrome equals R. The 24-bit CRC makes false corrections rare.
+const SYNDROME = (() => {
+  const map = new Map<number, number>();
+  for (let i = 0; i < LONG_BITS; i++) {
+    const e = new Uint8Array(LONG_BITS / 8);
+    e[i >> 3] = 1 << (7 - (i & 7));
+    map.set(crcResidual(e), i);
+  }
+  return map;
+})();
+
 interface CprFrame {
   lat: number; // raw 17-bit
   lon: number;
@@ -37,12 +55,14 @@ interface CprFrame {
 interface Aircraft {
   icao: string;
   callsign?: string;
+  category?: string;
   altitude?: number;
   lat?: number;
   lon?: number;
   speed?: number;
   heading?: number;
   vertRate?: number;
+  rssi?: number;
   messages: number;
   lastSeen: number;
   cprEven?: CprFrame;
@@ -58,9 +78,17 @@ export class AdsbReceiver {
   private bits = new Uint8Array(LONG_BITS);
   private msg = new Uint8Array(LONG_BITS / 8);
   private decoded = 0; // running count of valid frames, for rate display
+  private refLat: number | null = null;
+  private refLon: number | null = null;
 
   get totalMessages(): number {
     return this.decoded;
+  }
+
+  /** Set (or clear) the receiver reference position for local CPR decoding. */
+  setRef(lat: number | null, lon: number | null) {
+    this.refLat = lat;
+    this.refLon = lon;
   }
 
   reset() {
@@ -97,12 +125,14 @@ export class AdsbReceiver {
       out.push({
         icao: a.icao,
         callsign: a.callsign,
+        category: a.category,
         altitude: a.altitude,
         lat: a.lat,
         lon: a.lon,
         speed: a.speed,
         heading: a.heading,
         vertRate: a.vertRate,
+        rssi: a.rssi != null ? Math.round(a.rssi * 10) / 10 : undefined,
         messages: a.messages,
         seen: (now - a.lastSeen) / 1000,
       });
@@ -152,8 +182,7 @@ export class AdsbReceiver {
         const hi = m[j + PREAMBLE_SAMPLES + i + 1]!;
         let bit: number;
         if (low === hi) {
-          // Ambiguous; carry the previous bit (dump1090 phase correction).
-          bit = prev;
+          bit = prev; // ambiguous; carry previous (dump1090 phase correction)
           errors++;
         } else {
           bit = low > hi ? 1 : 0;
@@ -178,17 +207,28 @@ export class AdsbReceiver {
 
       const df = msg[0]! >> 3;
       if (df !== 17 && df !== 18) continue; // only extended squitter
-      if (crcResidual(msg) !== 0) continue; // reject on any bit error
+
+      // Validate, correcting a single bit error if the syndrome identifies one.
+      const residual = crcResidual(msg);
+      if (residual !== 0) {
+        const fix = SYNDROME.get(residual);
+        if (fix === undefined || fix < 5) continue; // unrecoverable / DF-field
+        msg[fix >> 3]! ^= 1 << (7 - (fix & 7));
+      }
+
+      // Signal level from the four preamble pulses (0 dBFS = full scale).
+      const sig = (m[j]! + m[j + 2]! + m[j + 7]! + m[j + 9]!) / 4;
+      const rssi = 20 * Math.log10(Math.max(sig, 1) / 65535);
 
       this.decoded++;
-      this.handleMessage(msg);
+      this.handleMessage(msg, rssi);
       j += MSG_SAMPLES - 1; // skip past this frame
     }
   }
 
   // --- message decoding (DF17/DF18 ADS-B) ---
 
-  private handleMessage(msg: Uint8Array) {
+  private handleMessage(msg: Uint8Array, rssi: number) {
     const icao =
       msg[1]!.toString(16).padStart(2, "0") +
       msg[2]!.toString(16).padStart(2, "0") +
@@ -203,9 +243,11 @@ export class AdsbReceiver {
     }
     a.messages++;
     a.lastSeen = now;
+    a.rssi = a.rssi == null ? rssi : a.rssi * 0.7 + rssi * 0.3;
 
     if (tc >= 1 && tc <= 4) {
       a.callsign = decodeCallsign(msg);
+      a.category = decodeCategory(tc, msg[4]! & 0x07);
     } else if ((tc >= 9 && tc <= 18) || (tc >= 20 && tc <= 22)) {
       this.decodePosition(a, msg, tc, now);
     } else if (tc === 19) {
@@ -228,9 +270,24 @@ export class AdsbReceiver {
     const odd = (msg[6]! & 0x04) !== 0;
     const latCpr = ((msg[6]! & 0x03) << 15) | (msg[7]! << 7) | (msg[8]! >> 1);
     const lonCpr = ((msg[8]! & 0x01) << 16) | (msg[9]! << 8) | msg[10]!;
-    const frame: CprFrame = { lat: latCpr, lon: lonCpr, t: now };
-    if (odd) a.cprOdd = frame;
-    else a.cprEven = frame;
+    if (odd) a.cprOdd = { lat: latCpr, lon: lonCpr, t: now };
+    else a.cprEven = { lat: latCpr, lon: lonCpr, t: now };
+
+    // Prefer a single-frame local solution when we know where we are.
+    if (this.refLat != null && this.refLon != null) {
+      const pos = cprLocal(
+        this.refLat,
+        this.refLon,
+        latCpr / 131072,
+        lonCpr / 131072,
+        odd,
+      );
+      if (pos) {
+        a.lat = pos.lat;
+        a.lon = pos.lon;
+      }
+      return;
+    }
 
     if (
       a.cprEven &&
@@ -279,6 +336,13 @@ function decodeCallsign(msg: Uint8Array): string {
   let s = "";
   for (const i of idx) s += IDENT_CHARS[i] ?? "#";
   return s.replace(/#/g, "").trim();
+}
+
+/** Emitter category, e.g. "A3" (large), "A7" (rotorcraft), "B1" (glider). */
+function decodeCategory(tc: number, ca: number): string | undefined {
+  if (ca === 0) return undefined;
+  const set = ["?", "D", "C", "B", "A"][tc]; // TC 1->D, 2->C, 3->B, 4->A
+  return set ? `${set}${ca}` : undefined;
 }
 
 /** 12-bit barometric altitude field -> feet (Q-bit / 25 ft increments). */
@@ -362,4 +426,30 @@ function cprGlobal(
   if (lon >= 180) lon -= 360;
   if (lat < -90 || lat > 90) return null;
   return { lat, lon };
+}
+
+/** Single-frame position relative to a known receiver location (±~180 NM). */
+function cprLocal(
+  refLat: number,
+  refLon: number,
+  cprLat: number,
+  cprLon: number,
+  odd: boolean,
+): { lat: number; lon: number } | null {
+  const dLat = odd ? 360 / 59 : 360 / 60;
+  const j =
+    Math.floor(refLat / dLat) +
+    Math.floor(0.5 + mod(refLat, dLat) / dLat - cprLat);
+  const rlat = dLat * (j + cprLat);
+  if (rlat < -90 || rlat > 90) return null;
+
+  const nl = cprNL(rlat);
+  const ni = odd ? Math.max(nl - 1, 1) : Math.max(nl, 1);
+  const dLon = 360 / ni;
+  const m =
+    Math.floor(refLon / dLon) +
+    Math.floor(0.5 + mod(refLon, dLon) / dLon - cprLon);
+  let rlon = dLon * (m + cprLon);
+  if (rlon >= 180) rlon -= 360;
+  return { lat: rlat, lon: rlon };
 }

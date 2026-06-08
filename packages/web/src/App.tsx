@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { DEFAULT_STATE, type RadioState } from "@sdr/shared";
 import { useRadio } from "@/lib/ws";
 import { PcmPlayer } from "@/audio/pcm-player";
@@ -7,9 +7,13 @@ import { Controls } from "@/components/Controls";
 import { Presets } from "@/components/Presets";
 import { Bookmarks } from "@/components/Bookmarks";
 import { Vfo } from "@/components/Vfo";
-import { AdsbMap } from "@/components/AdsbMap";
 import { AdsbPanel } from "@/components/AdsbPanel";
 import { Activity, AlertTriangle, AudioWaveform, Plane } from "lucide-react";
+
+// OpenLayers is heavy; only load the map when the ADS-B view is opened.
+const AdsbMap = lazy(() =>
+  import("@/components/AdsbMap").then((m) => ({ default: m.AdsbMap })),
+);
 
 type View = "spectrum" | "adsb";
 
@@ -20,13 +24,28 @@ export default function App() {
   const [audioRunning, setAudioRunning] = useState(false);
   const [volume, setVolume] = useState(0.7);
   const [view, setView] = useState<View>("spectrum");
+  const [selected, setSelected] = useState<string | null>(null);
+  const [ref, setRef] = useState<{ lat: number; lon: number } | null>(loadRef);
 
   const state = radio.state ?? DEFAULT_STATE;
 
   const switchView = (v: View) => {
     setView(v);
+    if (v !== "adsb") setSelected(null);
     radio.send({ type: "setAdsb", on: v === "adsb" });
   };
+
+  const setReceiverRef = (lat: number | null, lon: number | null) => {
+    const next = lat != null && lon != null ? { lat, lon } : null;
+    setRef(next);
+    saveRef(next);
+  };
+
+  // Keep the server's reference position in sync (also re-sent on reconnect).
+  const { send, connected } = radio;
+  useEffect(() => {
+    send({ type: "setAdsbRef", lat: ref?.lat ?? null, lon: ref?.lon ?? null });
+  }, [send, connected, ref]);
 
   // Pipe audio frames to the player.
   useEffect(
@@ -60,6 +79,11 @@ export default function App() {
             <AdsbPanel
               aircraft={radio.aircraft}
               messageRate={radio.messageRate}
+              selected={selected}
+              onSelect={setSelected}
+              refLat={ref?.lat ?? null}
+              refLon={ref?.lon ?? null}
+              onSetRef={setReceiverRef}
             />
           ) : (
             <>
@@ -107,7 +131,21 @@ export default function App() {
             </>
           ) : (
             <div className="min-h-0 flex-1">
-              <AdsbMap aircraft={radio.aircraft} />
+              <Suspense
+                fallback={
+                  <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                    Loading map…
+                  </div>
+                }
+              >
+                <AdsbMap
+                  aircraft={radio.aircraft}
+                  selected={selected}
+                  onSelect={setSelected}
+                  refLat={ref?.lat ?? null}
+                  refLon={ref?.lon ?? null}
+                />
+              </Suspense>
             </div>
           )}
         </main>
@@ -116,6 +154,28 @@ export default function App() {
       <StatusBar state={state} audioRunning={audioRunning} view={view} />
     </div>
   );
+}
+
+const REF_KEY = "sdr.adsb.ref";
+
+function loadRef(): { lat: number; lon: number } | null {
+  try {
+    const v = localStorage.getItem(REF_KEY);
+    if (!v) return null;
+    const r = JSON.parse(v);
+    return typeof r?.lat === "number" && typeof r?.lon === "number" ? r : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveRef(r: { lat: number; lon: number } | null) {
+  try {
+    if (r) localStorage.setItem(REF_KEY, JSON.stringify(r));
+    else localStorage.removeItem(REF_KEY);
+  } catch {
+    /* storage unavailable */
+  }
 }
 
 function ViewTabs({

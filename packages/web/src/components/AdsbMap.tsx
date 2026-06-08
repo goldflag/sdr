@@ -1,9 +1,9 @@
-// Live ADS-B map. Renders each tracked aircraft (those with a decoded position)
-// as a heading-rotated plane marker on an OpenLayers/OSM map, updating in place
-// as new snapshots arrive. Aircraft are keyed by ICAO so markers move rather
-// than flicker. The view auto-fits to traffic once, then stays under user control.
+// Live ADS-B map. Renders each positioned aircraft as a category-shaped,
+// heading-rotated, altitude-colored marker on a dark OpenLayers/OSM map, with
+// fading by age, flight trails, an optional receiver marker + range rings, a
+// click-to-select detail popup, and table<->map selection linking.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type { AircraftReport } from "@sdr/shared";
 import OLMap from "ol/Map";
 import View from "ol/View";
@@ -12,25 +12,82 @@ import OSM from "ol/source/OSM";
 import VectorLayer from "ol/layer/Vector";
 import VectorSource from "ol/source/Vector";
 import Feature from "ol/Feature";
+import Overlay from "ol/Overlay";
 import Point from "ol/geom/Point";
+import LineString from "ol/geom/LineString";
+import { circular } from "ol/geom/Polygon";
 import { fromLonLat } from "ol/proj";
-import { Icon, Style, Text, Fill, Stroke } from "ol/style";
+import {
+  Icon,
+  Style,
+  Text,
+  Fill,
+  Stroke,
+  Circle as CircleStyle,
+} from "ol/style";
+import { categoryInfo, icaoInfo, type AircraftKind } from "@/lib/icao";
+import { distanceNm, bearing } from "@/lib/geo";
 import "ol/ol.css";
 
 interface Props {
   aircraft: AircraftReport[];
+  selected: string | null;
+  onSelect: (icao: string | null) => void;
+  refLat: number | null;
+  refLon: number | null;
 }
 
-// Airplane silhouette pointing north (heading 0); OL rotates it clockwise.
-const PLANE_SVG = (color: string) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24">` +
-  `<path d="M12 2 L12.9 9 L21 14 L21 15.8 L12.9 13 L12.9 19 L15.5 20.8 L15.5 22 L12 20.9 L8.5 22 L8.5 20.8 L11.1 19 L11.1 13 L3 15.8 L3 14 L11.1 9 Z" ` +
-  `fill="${color}" stroke="#0b0f1a" stroke-width="0.8" stroke-linejoin="round"/></svg>`;
+const MAX_TRAIL = 60; // points kept per aircraft trail
+const STALE_S = 60;
 
-const svgUrl = (color: string) =>
-  "data:image/svg+xml;utf8," + encodeURIComponent(PLANE_SVG(color));
+// --- marker icons ----------------------------------------------------------
 
-// Altitude → color ramp (low = teal, high = warm), echoing the spectrum palette.
+const SHAPES: Record<AircraftKind, (c: string) => string> = {
+  plane: (c) => planeSvg(c, 30),
+  heavy: (c) => planeSvg(c, 36),
+  light: (c) => planeSvg(c, 22),
+  heli: (c) =>
+    svg(
+      28,
+      `<circle cx="12" cy="12" r="3.2" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>` +
+        `<line x1="3" y1="3" x2="21" y2="21" stroke="${c}" stroke-width="1.6"/>` +
+        `<line x1="21" y1="3" x2="3" y2="21" stroke="${c}" stroke-width="1.6"/>`,
+    ),
+  ground: (c) =>
+    svg(
+      20,
+      `<rect x="7" y="7" width="10" height="10" rx="2" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>`,
+    ),
+};
+
+function svg(size: number, body: string): string {
+  return (
+    "data:image/svg+xml;utf8," +
+    encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24">${body}</svg>`,
+    )
+  );
+}
+
+function planeSvg(color: string, size: number): string {
+  return svg(
+    size,
+    `<path d="M12 2 L12.9 9 L21 14 L21 15.8 L12.9 13 L12.9 19 L15.5 20.8 L15.5 22 L12 20.9 L8.5 22 L8.5 20.8 L11.1 19 L11.1 13 L3 15.8 L3 14 L11.1 9 Z" ` +
+      `fill="${color}" stroke="#0b0f1a" stroke-width="0.8" stroke-linejoin="round"/>`,
+  );
+}
+
+// A fresh Icon per update is cheap: OpenLayers caches the decoded image by src,
+// so only rotation/opacity vary per aircraft.
+function icon(kind: AircraftKind, color: string, rotation: number, opacity: number) {
+  return new Icon({
+    src: SHAPES[kind](color),
+    rotation,
+    opacity,
+    rotateWithView: true,
+  });
+}
+
 function altColor(alt?: number): string {
   if (alt == null) return "#9ca3af";
   const t = Math.min(1, Math.max(0, alt / 40000));
@@ -40,103 +97,301 @@ function altColor(alt?: number): string {
     [0.8, "#fbbf24"],
     [1, "#f87171"],
   ];
-  for (let i = 1; i < stops.length; i++) {
-    if (t <= stops[i]![0]) return stops[i]![1];
-  }
+  for (let i = 1; i < stops.length; i++) if (t <= stops[i]![0]) return stops[i]![1];
   return "#f87171";
 }
 
 function label(a: AircraftReport): string {
-  const id = a.callsign?.trim() || a.icao.toUpperCase();
-  const alt = a.altitude != null ? `${Math.round(a.altitude / 100) * 100} ft` : "";
+  const id =
+    a.callsign?.trim() || icaoInfo(a.icao).registration || a.icao.toUpperCase();
+  const alt = a.altitude != null ? `${Math.round(a.altitude / 100) * 100}ft` : "";
   return alt ? `${id}\n${alt}` : id;
 }
 
-export function AdsbMap({ aircraft }: Props) {
+export function AdsbMap({ aircraft, selected, onSelect, refLat, refLon }: Props) {
   const elRef = useRef<HTMLDivElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<OLMap | null>(null);
-  const sourceRef = useRef<VectorSource | null>(null);
-  const featuresRef = useRef(new Map<string, Feature>());
+  const planeSrc = useRef<VectorSource | null>(null);
+  const trailSrc = useRef<VectorSource | null>(null);
+  const rangeSrc = useRef<VectorSource | null>(null);
+  const overlayRef = useRef<Overlay | null>(null);
+  const planeFeats = useRef(new Map<string, Feature>());
+  const trailFeats = useRef(new Map<string, Feature>());
+  const trails = useRef(new Map<string, number[][]>());
   const didFit = useRef(false);
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
+
+  const selectedAircraft = useMemo(
+    () => aircraft.find((a) => a.icao === selected) ?? null,
+    [aircraft, selected],
+  );
 
   // One-time map setup.
   useEffect(() => {
     if (!elRef.current) return;
-    const source = new VectorSource();
-    sourceRef.current = source;
+    const planes = new VectorSource();
+    const trailV = new VectorSource();
+    const range = new VectorSource();
+    planeSrc.current = planes;
+    trailSrc.current = trailV;
+    rangeSrc.current = range;
+
     const map = new OLMap({
       target: elRef.current,
       layers: [
-        new TileLayer({ source: new OSM() }),
-        new VectorLayer({ source }),
+        // Dark basemap: its own canvas (className) so the CSS filter doesn't
+        // touch the vector overlays.
+        new TileLayer({ source: new OSM(), className: "ol-basemap-dark" }),
+        new VectorLayer({ source: range }),
+        new VectorLayer({ source: trailV }),
+        new VectorLayer({ source: planes }),
       ],
       view: new View({ center: fromLonLat([-98, 39]), zoom: 4 }),
       controls: [],
     });
     mapRef.current = map;
+
+    if (popupRef.current) {
+      const overlay = new Overlay({
+        element: popupRef.current,
+        positioning: "bottom-center",
+        offset: [0, -20],
+        stopEvent: false,
+      });
+      map.addOverlay(overlay);
+      overlayRef.current = overlay;
+    }
+
+    map.on("singleclick", (e) => {
+      let hit: string | null = null;
+      map.forEachFeatureAtPixel(
+        e.pixel,
+        (f) => {
+          const id = f.get("icao");
+          if (id) {
+            hit = id;
+            return true;
+          }
+        },
+        { hitTolerance: 6 },
+      );
+      onSelectRef.current(hit);
+    });
+
     return () => {
       map.setTarget(undefined);
       mapRef.current = null;
     };
   }, []);
 
-  // Sync features with the latest aircraft snapshot.
+  // Receiver marker + range rings.
   useEffect(() => {
-    const source = sourceRef.current;
-    if (!source) return;
-    const feats = featuresRef.current;
+    const src = rangeSrc.current;
+    if (!src) return;
+    src.clear();
+    if (refLat == null || refLon == null) return;
+    const center = [refLon, refLat];
+    for (const nm of [50, 100, 150, 200]) {
+      const ring = new Feature(circular(center, nm * 1852, 96).transform("EPSG:4326", "EPSG:3857"));
+      ring.setStyle(
+        new Style({
+          stroke: new Stroke({ color: "rgba(120,160,200,0.28)", width: 1 }),
+          text: new Text({
+            text: `${nm}`,
+            font: "10px ui-monospace, monospace",
+            fill: new Fill({ color: "rgba(150,180,210,0.6)" }),
+            offsetY: -6,
+            placement: "line",
+          }),
+        }),
+      );
+      src.addFeature(ring);
+    }
+    const me = new Feature(new Point(fromLonLat(center)));
+    me.setStyle(
+      new Style({
+        image: new CircleStyle({
+          radius: 5,
+          fill: new Fill({ color: "#60a5fa" }),
+          stroke: new Stroke({ color: "#0b0f1a", width: 1.5 }),
+        }),
+      }),
+    );
+    src.addFeature(me);
+  }, [refLat, refLon]);
+
+  // Sync aircraft markers + trails with the latest snapshot.
+  useEffect(() => {
+    const psrc = planeSrc.current;
+    const tsrc = trailSrc.current;
+    if (!psrc || !tsrc) return;
     const seen = new Set<string>();
 
     for (const a of aircraft) {
       if (a.lat == null || a.lon == null) continue;
       seen.add(a.icao);
       const coord = fromLonLat([a.lon, a.lat]);
-      let f = feats.get(a.icao);
+      const color = altColor(a.altitude);
+      const { kind } = categoryInfo(a.category);
+      const opacity = Math.max(0.35, 1 - a.seen / STALE_S);
+      const isSel = a.icao === selected;
+
+      // Trail history.
+      let path = trails.current.get(a.icao);
+      if (!path) {
+        path = [];
+        trails.current.set(a.icao, path);
+      }
+      const last = path[path.length - 1];
+      if (!last || last[0] !== coord[0] || last[1] !== coord[1]) {
+        path.push(coord);
+        if (path.length > MAX_TRAIL) path.shift();
+      }
+      let tf = trailFeats.current.get(a.icao);
+      if (!tf) {
+        tf = new Feature(new LineString(path));
+        trailFeats.current.set(a.icao, tf);
+        tsrc.addFeature(tf);
+      } else {
+        (tf.getGeometry() as LineString).setCoordinates(path);
+      }
+      tf.setStyle(
+        new Style({
+          stroke: new Stroke({
+            color: isSel ? color : "rgba(160,160,180,0.45)",
+            width: isSel ? 2 : 1,
+          }),
+        }),
+      );
+
+      // Marker.
+      let f = planeFeats.current.get(a.icao);
       if (!f) {
         f = new Feature({ geometry: new Point(coord) });
-        feats.set(a.icao, f);
-        source.addFeature(f);
+        f.set("icao", a.icao);
+        planeFeats.current.set(a.icao, f);
+        psrc.addFeature(f);
       } else {
         (f.getGeometry() as Point).setCoordinates(coord);
       }
-      f.setStyle(
-        new Style({
-          image: new Icon({
-            src: svgUrl(altColor(a.altitude)),
-            rotation: ((a.heading ?? 0) * Math.PI) / 180,
-            rotateWithView: true,
+      const styles: Style[] = [];
+      if (isSel) {
+        styles.push(
+          new Style({
+            image: new CircleStyle({
+              radius: 16,
+              stroke: new Stroke({ color: "#e5e7eb", width: 2 }),
+              fill: new Fill({ color: "rgba(229,231,235,0.12)" }),
+            }),
           }),
+        );
+      }
+      styles.push(
+        new Style({
+          image: icon(kind, color, ((a.heading ?? 0) * Math.PI) / 180, opacity),
           text: new Text({
             text: label(a),
-            offsetY: 26,
+            offsetY: 24,
             font: "600 11px ui-monospace, Menlo, monospace",
-            fill: new Fill({ color: "#0b0f1a" }),
-            stroke: new Stroke({ color: "rgba(255,255,255,0.85)", width: 3 }),
+            fill: new Fill({ color: "#e8edf6" }),
+            stroke: new Stroke({ color: "rgba(8,12,20,0.9)", width: 3 }),
             textAlign: "center",
           }),
         }),
       );
+      f.setStyle(styles);
     }
 
     // Drop aircraft that aged out of the snapshot.
-    for (const [icao, f] of feats) {
+    for (const [icao, f] of planeFeats.current) {
       if (!seen.has(icao)) {
-        source.removeFeature(f);
-        feats.delete(icao);
+        psrc.removeFeature(f);
+        planeFeats.current.delete(icao);
+        const tf = trailFeats.current.get(icao);
+        if (tf) {
+          tsrc.removeFeature(tf);
+          trailFeats.current.delete(icao);
+        }
+        trails.current.delete(icao);
       }
     }
 
-    // Fit the view to traffic the first time we have positions.
-    if (!didFit.current && feats.size > 0) {
-      const extent = source.getExtent();
+    if (!didFit.current && planeFeats.current.size > 0) {
+      const extent = psrc.getExtent();
       if (extent && Number.isFinite(extent[0]!)) {
         mapRef.current
           ?.getView()
-          .fit(extent, { padding: [60, 60, 60, 60], maxZoom: 10, duration: 400 });
+          .fit(extent, { padding: [70, 70, 70, 70], maxZoom: 10, duration: 400 });
         didFit.current = true;
       }
     }
-  }, [aircraft]);
+  }, [aircraft, selected]);
 
-  return <div ref={elRef} className="h-full w-full" />;
+  // Position the detail popup over the selected aircraft.
+  useEffect(() => {
+    const ov = overlayRef.current;
+    if (!ov) return;
+    if (selectedAircraft?.lat != null && selectedAircraft.lon != null) {
+      ov.setPosition(fromLonLat([selectedAircraft.lon, selectedAircraft.lat]));
+    } else {
+      ov.setPosition(undefined);
+    }
+  }, [selectedAircraft]);
+
+  const sel = selectedAircraft;
+  const info = sel ? icaoInfo(sel.icao) : null;
+  const dist =
+    sel?.lat != null && refLat != null && refLon != null
+      ? distanceNm(refLat, refLon, sel.lat, sel.lon!)
+      : null;
+  const brg =
+    sel?.lat != null && refLat != null && refLon != null
+      ? bearing(refLat, refLon, sel.lat, sel.lon!)
+      : null;
+
+  return (
+    <div className="relative h-full w-full">
+      <div ref={elRef} className="h-full w-full" />
+      <div
+        ref={popupRef}
+        className={`pointer-events-none w-52 -translate-x-1/2 rounded-md border bg-popover/95 p-2.5 text-[11px] shadow-lg backdrop-blur ${
+          sel ? "" : "hidden"
+        }`}
+      >
+        {sel && (
+          <>
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <span className="font-mono text-xs font-semibold text-foreground">
+                {sel.callsign?.trim() || info?.registration || sel.icao.toUpperCase()}
+              </span>
+              {info?.flag && <span className="text-sm">{info.flag}</span>}
+            </div>
+            <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono text-muted-foreground">
+              <Row k="ICAO" v={sel.icao.toUpperCase()} />
+              {info?.registration && <Row k="Reg" v={info.registration} />}
+              <Row k="Cat" v={categoryInfo(sel.category).label} />
+              <Row k="Alt" v={sel.altitude != null ? `${sel.altitude.toLocaleString()} ft` : "—"} />
+              <Row k="Spd" v={sel.speed != null ? `${sel.speed} kt` : "—"} />
+              <Row k="Hdg" v={sel.heading != null ? `${sel.heading}°` : "—"} />
+              <Row k="V/S" v={sel.vertRate != null ? `${sel.vertRate} fpm` : "—"} />
+              {dist != null && <Row k="Dist" v={`${dist.toFixed(0)} NM`} />}
+              {brg != null && <Row k="Brg" v={`${brg.toFixed(0)}°`} />}
+              <Row k="Sig" v={sel.rssi != null ? `${sel.rssi} dB` : "—"} />
+            </dl>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Row({ k, v }: { k: string; v: string }) {
+  return (
+    <>
+      <dt className="text-muted-foreground/70">{k}</dt>
+      <dd className="text-right text-foreground/85">{v}</dd>
+    </>
+  );
 }

@@ -103,7 +103,9 @@ export type ClientMessage =
   /** VFO offset from the dongle center frequency, in Hz (tune within the band). */
   | { type: "setVfoOffset"; hz: number }
   /** Toggle ADS-B mode: retunes to 1090 MHz @ 2 MSPS and decodes Mode S. */
-  | { type: "setAdsb"; on: boolean };
+  | { type: "setAdsb"; on: boolean }
+  /** Receiver location for single-frame (local) CPR position decoding. */
+  | { type: "setAdsbRef"; lat: number | null; lon: number | null };
 
 // ---------------------------------------------------------------------------
 // Server -> Client (JSON status)
@@ -114,12 +116,15 @@ export interface AircraftReport {
   /** 24-bit ICAO address, lowercase hex. */
   icao: string;
   callsign?: string;
+  /** Emitter category code, e.g. "A3" (large), "A7" (rotorcraft). */
+  category?: string;
   altitude?: number; // feet (barometric)
   lat?: number;
   lon?: number;
   speed?: number; // ground speed, knots
   heading?: number; // track, degrees
   vertRate?: number; // ft/min
+  rssi?: number; // signal level, dBFS
   messages: number;
   seen: number; // seconds since last message
 }

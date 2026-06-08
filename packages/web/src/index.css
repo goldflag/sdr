@@ -179,3 +179,9 @@
     background-clip: content-box;
   }
 }
+/* ADS-B map: darken only the basemap tiles (its own canvas via layer
+   className) so vector markers, trails and labels keep their true colors. */
+.ol-basemap-dark {
+  filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.92)
+    saturate(0.75);
+}

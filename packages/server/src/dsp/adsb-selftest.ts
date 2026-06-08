@@ -98,5 +98,42 @@ check(
   vel?.heading,
 );
 
+// --- single-bit error correction -------------------------------------------
+{
+  const bytes = hexToBytes(FRAMES[0]!); // ident frame
+  bytes[7]! ^= 0x20; // flip one data bit (in the ME field, not the DF)
+  const rx2 = new AdsbReceiver();
+  const pad = new Float32Array(GAP * 2);
+  const buf = new Float32Array(pad.length * 2 + 480);
+  buf.set(pad, 0);
+  buf.set(synth(bytes), pad.length);
+  buf.set(pad, pad.length + 480);
+  rx2.process(buf);
+  const a = rx2.snapshot(Date.now()).find((x) => x.icao === "4840d6");
+  check("1-bit error corrected", a?.callsign === "KLM1023", a?.callsign);
+}
+
+// --- local (single-frame) CPR ----------------------------------------------
+{
+  const rx3 = new AdsbReceiver();
+  rx3.setRef(52.0, 4.0); // near the true position
+  const pad = new Float32Array(GAP * 2);
+  const even = synth(hexToBytes("8D40621D58C382D690C8AC2863A7"));
+  const buf = new Float32Array(pad.length * 2 + 480);
+  buf.set(pad, 0);
+  buf.set(even, pad.length);
+  buf.set(pad, pad.length + 480);
+  rx3.process(buf);
+  const a = rx3.snapshot(Date.now()).find((x) => x.icao === "40621d");
+  check("local CPR from one frame", !!a?.lat, a);
+  check(
+    "local position ≈ (52.26, 3.92)",
+    a?.lat != null &&
+      Math.abs(a.lat - 52.2572) < 0.05 &&
+      Math.abs(a.lon! - 3.91937) < 0.05,
+    a && [a.lat, a.lon],
+  );
+}
+
 console.log(`\n${pass ? "ALL PASSED" : "FAILURES"}`);
 process.exit(pass ? 0 : 1);
