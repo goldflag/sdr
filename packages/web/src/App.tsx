@@ -5,7 +5,7 @@ import { PcmPlayer } from "@/audio/pcm-player";
 import { SpectrumWaterfall } from "@/components/SpectrumWaterfall";
 import { Controls } from "@/components/Controls";
 import { Vfo } from "@/components/Vfo";
-import { Activity, Radio, AlertTriangle } from "lucide-react";
+import { Activity, AlertTriangle } from "lucide-react";
 
 export default function App() {
   const radio = useRadio();
@@ -35,8 +35,6 @@ export default function App() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
-      <TopBar connected={radio.connected} device={radio.deviceInfo?.tunerName} />
-
       {radio.error && (
         <div className="flex items-center gap-2 border-b border-destructive/30 bg-destructive/10 px-5 py-1.5 text-xs text-destructive">
           <AlertTriangle className="size-3.5 shrink-0" /> {radio.error}
@@ -44,22 +42,8 @@ export default function App() {
       )}
 
       <div className="flex min-h-0 flex-1">
-        {/* Main column: tuning bar + spectrum/waterfall */}
-        <main className="flex min-w-0 flex-1 flex-col">
-          <div className="border-b px-5 py-4">
-            <Vfo state={state} send={radio.send} />
-          </div>
-          <div className="min-h-0 flex-1 p-4">
-            <SpectrumWaterfall
-              subscribeFft={radio.subscribeFft}
-              state={state}
-              onTune={(hz) => radio.send({ type: "setVfoOffset", hz })}
-            />
-          </div>
-        </main>
-
         {/* Control rail */}
-        <aside className="scroll-thin w-[320px] shrink-0 overflow-y-auto border-l bg-sidebar">
+        <aside className="scroll-thin w-[320px] shrink-0 overflow-y-auto border-r bg-sidebar">
           <Controls
             state={state}
             deviceInfo={radio.deviceInfo}
@@ -74,43 +58,24 @@ export default function App() {
             onEnableAudio={enableAudio}
           />
         </aside>
+
+        {/* Main column: tuning bar + spectrum/waterfall */}
+        <main className="flex min-w-0 flex-1 flex-col">
+          <div className="border-b px-5 py-4">
+            <Vfo state={state} send={radio.send} />
+          </div>
+          <div className="min-h-0 flex-1 p-4">
+            <SpectrumWaterfall
+              subscribeFft={radio.subscribeFft}
+              state={state}
+              onTune={(hz) => radio.send({ type: "setVfoOffset", hz })}
+            />
+          </div>
+        </main>
       </div>
 
       <StatusBar state={state} audioRunning={audioRunning} />
     </div>
-  );
-}
-
-function TopBar({ connected, device }: { connected: boolean; device?: string }) {
-  return (
-    <header className="flex items-center justify-between border-b px-5 py-2.5">
-      <div className="flex items-center gap-2.5">
-        <Radio className="size-4 text-primary" />
-        <span className="text-sm font-semibold tracking-tight">SDR</span>
-        <span className="font-mono text-xs text-muted-foreground">
-          RTL-SDR Blog V3
-        </span>
-      </div>
-      <div className="flex items-center gap-4 text-xs">
-        {device && (
-          <span className="font-mono text-muted-foreground">{device}</span>
-        )}
-        <span
-          className={`flex items-center gap-1.5 font-medium ${
-            connected ? "text-primary" : "text-muted-foreground"
-          }`}
-        >
-          <span
-            className={`size-1.5 rounded-full ${
-              connected
-                ? "bg-primary shadow-[0_0_6px_var(--primary)]"
-                : "bg-muted-foreground/40"
-            }`}
-          />
-          {connected ? "Connected" : "Offline"}
-        </span>
-      </div>
-    </header>
   );
 }
 
