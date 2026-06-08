@@ -33,8 +33,8 @@ export function Vfo({ state, send }: Props) {
   const bump = (place: number, dir: number) => setTuned(tuned + place * dir);
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
-      <div className="flex min-w-0 flex-col gap-1.5">
+    <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-2">
+      <div className="flex min-w-0 flex-col gap-1">
         {editing ? (
           <FrequencyInput
             tuned={tuned}
@@ -122,7 +122,7 @@ function DigitReadout({
     <div
       role="group"
       aria-label={`Tuned frequency ${(tuned / 1e6).toFixed(6)} megahertz. Click to type a frequency.`}
-      className="group/readout flex select-none items-end font-mono text-[2rem] leading-none font-semibold tabular-nums sm:text-[2.5rem]"
+      className="group/readout flex select-none items-end font-mono text-2xl leading-none font-semibold tabular-nums sm:text-[1.75rem]"
     >
       {digits.map((d, i) => {
         const place = PLACES[i]!;
@@ -141,7 +141,7 @@ function DigitReadout({
           </span>
         );
       })}
-      <span className="ml-2 self-center pb-[0.1em] text-sm font-medium text-muted-foreground">
+      <span className="ml-1.5 self-center pb-[0.08em] text-xs font-medium text-muted-foreground">
         Hz
       </span>
     </div>
@@ -251,7 +251,7 @@ function FrequencyInput({
   };
 
   return (
-    <div className="flex items-end gap-2 font-mono text-[2rem] leading-none font-semibold sm:text-[2.5rem]">
+    <div className="flex items-end gap-2 font-mono text-2xl leading-none font-semibold sm:text-[1.75rem]">
       <input
         ref={ref}
         value={value}
@@ -266,7 +266,7 @@ function FrequencyInput({
         className="w-[7ch] min-w-0 bg-transparent tabular-nums text-primary caret-primary outline-none placeholder:text-muted-foreground/40"
         aria-label="Enter frequency in MHz (or add a k / M / G suffix)"
       />
-      <span className="self-center pb-[0.1em] text-sm font-medium text-muted-foreground">
+      <span className="self-center pb-[0.08em] text-xs font-medium text-muted-foreground">
         MHz
       </span>
     </div>

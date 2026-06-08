@@ -12,7 +12,7 @@ interface Props {
 export function Presets({ state, send }: Props) {
   return (
     <Section title="Bands">
-      <div className="grid grid-cols-4 gap-1.5">
+      <div className="grid grid-cols-4 gap-1">
         {BAND_PRESETS.map((p) => {
           const active = tuningMatches(
             p,
@@ -24,7 +24,7 @@ export function Presets({ state, send }: Props) {
             <Button
               key={p.name}
               variant={active ? "default" : "outline"}
-              size="sm"
+              size="xs"
               onClick={() => applyTuning(send, p)}
             >
               {p.name}

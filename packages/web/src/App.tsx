@@ -65,7 +65,7 @@ export default function App() {
 
         {/* Main column: tuning bar + spectrum/waterfall */}
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="border-b px-5 py-4">
+          <div className="border-b px-4 py-2.5">
             <Vfo state={state} send={radio.send} />
           </div>
           <div className="min-h-0 flex-1 p-4">

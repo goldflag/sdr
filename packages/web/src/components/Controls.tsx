@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   type ClientMessage,
   type DeviceInfo,
@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import type { SignalState } from "@/lib/ws";
-import { Volume2, Power, AlertTriangle } from "lucide-react";
+import { Volume2, AlertTriangle, ChevronRight } from "lucide-react";
 
 interface Props {
   state: RadioState;
@@ -41,6 +41,8 @@ const BW_RANGE: Record<Mode, [number, number, number]> = {
   LSB: [1_200, 4_000, 100],
   CW: [100, 2_000, 50],
 };
+
+const SELECT_TRIGGER = "h-7 w-full px-2 text-xs";
 
 export function Controls(p: Props) {
   const { state, deviceInfo, signal, send } = p;
@@ -70,9 +72,9 @@ export function Controls(p: Props) {
           />
         </Field>
 
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-1.5">
           <div className="flex items-center justify-between">
-            <Label className="flex items-center gap-2">
+            <Label className="flex items-center gap-2 text-xs">
               Squelch
               <span
                 className={`size-1.5 rounded-full transition-colors ${
@@ -84,10 +86,11 @@ export function Controls(p: Props) {
               />
             </Label>
             <div className="flex items-center gap-2">
-              <span className="font-mono text-xs text-muted-foreground">
+              <span className="font-mono text-[11px] text-muted-foreground">
                 {squelchOn ? `${state.squelchDb!.toFixed(0)} dB` : "off"}
               </span>
               <Switch
+                size="sm"
                 checked={squelchOn}
                 onCheckedChange={(on) =>
                   send({ type: "setSquelch", db: on ? -40 : null })
@@ -121,7 +124,7 @@ export function Controls(p: Props) {
             />
           </Field>
         ) : (
-          <Button onClick={p.onEnableAudio} className="w-full" size="lg">
+          <Button onClick={p.onEnableAudio} className="w-full" size="sm">
             <Volume2 /> Enable audio output
           </Button>
         )}
@@ -129,12 +132,13 @@ export function Controls(p: Props) {
 
       <Section title="Gain">
         <div className="flex items-center justify-between">
-          <Label>Tuner AGC</Label>
+          <Label className="text-xs">Tuner AGC</Label>
           <div className="flex items-center gap-2">
-            <span className="font-mono text-xs text-muted-foreground">
+            <span className="font-mono text-[11px] text-muted-foreground">
               {state.gainMode === "auto" ? "auto" : "manual"}
             </span>
             <Switch
+              size="sm"
               checked={state.gainMode === "auto"}
               onCheckedChange={(on) =>
                 send({
@@ -160,22 +164,19 @@ export function Controls(p: Props) {
           </Field>
         )}
         {state.gainMode === "manual" && gains.length === 0 && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-[11px] text-muted-foreground">
             Gain steps unavailable until a tuner is detected.
           </p>
         )}
       </Section>
 
-      <Section
-        title="Device"
-        aside={deviceInfo?.tunerName ?? "no dongle"}
-      >
+      <Section title="Device" aside={deviceInfo?.tunerName ?? "no dongle"}>
         <Field label="Sample rate">
           <Select
             value={String(state.sampleRate)}
             onValueChange={(v) => send({ type: "setSampleRate", hz: Number(v) })}
           >
-            <SelectTrigger className="w-full">
+            <SelectTrigger className={SELECT_TRIGGER}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -195,7 +196,7 @@ export function Controls(p: Props) {
               send({ type: "setDirectSampling", value: Number(v) as 0 | 1 | 2 })
             }
           >
-            <SelectTrigger className="w-full">
+            <SelectTrigger className={SELECT_TRIGGER}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -223,15 +224,16 @@ export function Controls(p: Props) {
         </Field>
 
         <div className="flex items-center justify-between">
-          <Label>Bias tee (4.5 V)</Label>
+          <Label className="text-xs">Bias tee (4.5 V)</Label>
           <Switch
+            size="sm"
             checked={state.biasTee}
             onCheckedChange={(on) => send({ type: "setBiasTee", on })}
           />
         </div>
         {state.biasTee && (
-          <p className="flex items-start gap-1.5 text-xs text-destructive">
-            <AlertTriangle className="mt-px size-3.5 shrink-0" />
+          <p className="flex items-start gap-1.5 text-[11px] text-destructive">
+            <AlertTriangle className="mt-px size-3 shrink-0" />
             4.5 V is on the antenna port. Use only with a compatible powered LNA
             or antenna.
           </p>
@@ -243,19 +245,63 @@ export function Controls(p: Props) {
 
 // --- panel primitives ------------------------------------------------------
 
+const COLLAPSE_KEY = "sdr.panel.collapsed";
+
+function readCollapsed(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function persistCollapsed(title: string, collapsed: boolean) {
+  try {
+    const map = readCollapsed();
+    map[title] = collapsed;
+    localStorage.setItem(COLLAPSE_KEY, JSON.stringify(map));
+  } catch {
+    /* storage unavailable; collapse stays in-memory only */
+  }
+}
+
 export function Section({
   title,
   aside,
+  defaultOpen = true,
   children,
 }: {
   title: string;
   aside?: string;
+  defaultOpen?: boolean;
   children: ReactNode;
 }) {
+  const [open, setOpen] = useState(() => {
+    const stored = readCollapsed()[title];
+    return stored == null ? defaultOpen : !stored;
+  });
+
+  const toggle = () => {
+    setOpen((o) => {
+      persistCollapsed(title, o); // about to be the opposite → store the new collapsed state
+      return !o;
+    });
+  };
+
   return (
-    <section className="flex flex-col gap-3 border-b border-border/60 px-4 py-4 last:border-b-0">
-      <div className="flex items-baseline justify-between">
-        <h2 className="text-xs font-semibold tracking-wide text-foreground/80">
+    <section className="border-b border-border/60 last:border-b-0">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-accent/40"
+      >
+        <ChevronRight
+          className={`size-3 shrink-0 text-muted-foreground transition-transform duration-200 motion-reduce:transition-none ${
+            open ? "rotate-90" : ""
+          }`}
+        />
+        <h2 className="flex-1 text-[11px] font-semibold tracking-wide text-foreground/70">
           {title}
         </h2>
         {aside && (
@@ -263,8 +309,16 @@ export function Section({
             {aside}
           </span>
         )}
+      </button>
+      <div
+        className={`grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none ${
+          open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+        }`}
+      >
+        <div className="overflow-hidden">
+          <div className="flex flex-col gap-2.5 px-3 pb-3">{children}</div>
+        </div>
       </div>
-      {children}
     </section>
   );
 }
@@ -281,11 +335,13 @@ export function Field({
   children: ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex flex-col gap-1">
       <div className="flex items-baseline justify-between">
-        <Label>{label}</Label>
+        <Label className="text-xs">{label}</Label>
         {value && (
-          <span className="font-mono text-xs text-foreground/70">{value}</span>
+          <span className="font-mono text-[11px] text-foreground/70">
+            {value}
+          </span>
         )}
       </div>
       {children}
@@ -305,9 +361,9 @@ function SMeter({ signal }: { signal: SignalState | null }) {
   const lit = Math.round(frac * SEG_COUNT);
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex items-end gap-3">
-        <div className="flex h-7 flex-1 items-stretch gap-px">
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-2.5">
+        <div className="flex h-5 flex-1 items-stretch gap-px">
           {Array.from({ length: SEG_COUNT }, (_, i) => {
             const on = i < lit;
             // Top fifth of the scale reads "strong" in warm amber.
@@ -326,9 +382,9 @@ function SMeter({ signal }: { signal: SignalState | null }) {
             );
           })}
         </div>
-        <span className="w-16 text-right font-mono text-sm tabular-nums text-foreground">
+        <span className="w-14 text-right font-mono text-xs tabular-nums text-foreground">
           {signal ? `${db.toFixed(0)}` : "––"}
-          <span className="ml-1 text-xs text-muted-foreground">dB</span>
+          <span className="ml-1 text-[11px] text-muted-foreground">dB</span>
         </span>
       </div>
       <div className="flex justify-between px-px font-mono text-[10px] text-muted-foreground/70">

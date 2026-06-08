@@ -35,7 +35,7 @@ export function Bookmarks({ state, send }: Props) {
     >
       <Button
         variant="secondary"
-        size="sm"
+        size="xs"
         className="w-full"
         onClick={addCurrent}
       >
@@ -43,7 +43,7 @@ export function Bookmarks({ state, send }: Props) {
       </Button>
 
       {items.length > 0 && (
-        <ul className="flex flex-col gap-0.5">
+        <ul className="flex flex-col gap-px">
           {items.map((b) => {
             const active = tuningMatches(
               b,
@@ -55,10 +55,8 @@ export function Bookmarks({ state, send }: Props) {
               <li key={b.id} className="group flex items-center gap-1">
                 <button
                   onClick={() => applyTuning(send, b)}
-                  className={`flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
-                    active
-                      ? "bg-primary/15 text-primary"
-                      : "hover:bg-accent"
+                  className={`flex min-w-0 flex-1 items-center justify-between gap-2 px-2 py-1 text-left text-xs transition-colors ${
+                    active ? "bg-primary/15 text-primary" : "hover:bg-accent"
                   }`}
                 >
                   <span className="truncate">{b.label}</span>
@@ -68,7 +66,7 @@ export function Bookmarks({ state, send }: Props) {
                 </button>
                 <button
                   onClick={() => remove(b.id)}
-                  className="rounded p-1 text-muted-foreground/50 opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+                  className="p-1 text-muted-foreground/50 opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
                   title="Delete bookmark"
                 >
                   <Trash2 className="size-3.5" />
