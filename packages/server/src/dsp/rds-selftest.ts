@@ -95,7 +95,9 @@ for (const m of msgBits) {
 // --- modulate the MPX --------------------------------------------------------
 
 const nsym = tx.length;
-const totalSamples = Math.ceil((nsym / BIT_RATE) * FS) + FS / 10;
+// A short tail (just enough to flush the decimator/matched filter); real RDS is
+// continuous, so we don't pad with silence that would inflate the error EMA.
+const totalSamples = Math.ceil((nsym / BIT_RATE) * FS) + FS / 100;
 const mpx = new Float32Array(totalSamples);
 const PHASE_OFFSET = 0.6; // a fixed carrier phase the Costas loop must recover
 for (let n = 0; n < totalSamples; n++) {

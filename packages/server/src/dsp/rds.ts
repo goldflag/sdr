@@ -138,18 +138,23 @@ export class RdsDecoder {
 
   // --- block synchroniser ---
   private reg = 0;
-  private synced = false;
+  private locked = false;
   private blockIndex = 0;
   private bitCount = 0;
   private consecBad = 0;
+  // Hunt state: the last offset word seen and how many bits ago, so we only
+  // lock when two valid offsets arrive 26 bits apart in the right sequence.
+  private huntPrevOff = -1;
+  private huntSince = 0;
   private blocks = [0, 0, 0, 0];
   private blockValid = [false, false, false, false];
-  private ber = 0; // exponential-average block error rate, 0..1
+  private ber = 1; // exponential-average block error rate, 0..1
   private groups = 0;
 
   // --- assembled station state ---
   private pi = 0;
   private havePi = false;
+  private piCandidate = -1; // PI must repeat across two groups before we trust it
   private psConf = new Array<number>(8).fill(0);
   private psTent = new Array<number>(8).fill(0);
   private rtConf = new Array<number>(64).fill(0);
@@ -164,6 +169,13 @@ export class RdsDecoder {
   private stereo?: boolean;
   private clock?: RdsClockTime;
   private afSet = new Set<number>();
+
+  // --- diagnostics (read + reset by diag(); env-gated logging in the session) ---
+  private dMpxAbs = 0;
+  private dMpxN = 0;
+  private dSubAbs = 0;
+  private dSubN = 0;
+  private dMatches = 0;
 
   constructor(fs = 256_000) {
     this.configure(fs);
@@ -211,15 +223,18 @@ export class RdsDecoder {
     this.mmPrevDec = 1;
     this.lastDiffBit = 0;
     this.reg = 0;
-    this.synced = false;
+    this.locked = false;
     this.blockIndex = 0;
     this.bitCount = 0;
     this.consecBad = 0;
+    this.huntPrevOff = -1;
+    this.huntSince = 0;
     this.blockValid = [false, false, false, false];
-    this.ber = 0;
+    this.ber = 1;
     this.groups = 0;
     this.havePi = false;
     this.pi = 0;
+    this.piCandidate = -1;
     this.psConf.fill(0);
     this.psTent.fill(0);
     this.rtConf.fill(0);
@@ -265,6 +280,12 @@ export class RdsDecoder {
     const dec = this.decim.process(cplx);
     const m = dec.length / 2;
     if (m === 0) return;
+
+    // Diagnostics: overall MPX level vs energy in the ±2.4 kHz RDS band.
+    for (let k = 0; k < n; k++) this.dMpxAbs += Math.abs(mpx[k]!);
+    this.dMpxN += n;
+    for (let j = 0; j < m; j++) this.dSubAbs += Math.hypot(dec[2 * j]!, dec[2 * j + 1]!);
+    this.dSubN += m;
 
     // 3. Costas loop: derotate to a real BPSK baseband.
     const baseband = new Float32Array(m);
@@ -327,15 +348,32 @@ export class RdsDecoder {
 
   private pushBit(bit: number) {
     this.reg = ((this.reg << 1) | bit) & 0x3ffffff; // 26-bit window
-    if (!this.synced) {
+    if (!this.locked) {
+      // Hunting. A single 26-bit window matches an offset word by chance roughly
+      // 1-in-200 on noise, so we never lock on one match. We require a second
+      // valid offset exactly 26 bits later and one block further in the A→B→C→D
+      // sequence — a coincidence vanishingly unlikely on noise.
+      this.huntSince++;
       const num = BLOCK_NUM_BY_OFFSET[syndrome(this.reg)];
       if (num !== undefined) {
-        // Tentatively lock to this block boundary and read forward.
-        this.synced = true;
-        this.blockIndex = num;
-        this.bitCount = 0;
-        this.consecBad = 0;
-        this.storeBlock(num, this.reg, true);
+        this.dMatches++;
+        if (
+          this.huntPrevOff >= 0 &&
+          this.huntSince === 26 &&
+          num === (this.huntPrevOff + 1) % 4
+        ) {
+          this.locked = true;
+          this.blockIndex = num;
+          this.bitCount = 0;
+          this.consecBad = 0;
+          this.blockValid = [false, false, false, false];
+          this.storeBlock(num, this.reg, true);
+        } else {
+          this.huntPrevOff = num;
+        }
+        this.huntSince = 0;
+      } else if (this.huntSince > 27) {
+        this.huntPrevOff = -1; // candidate went stale
       }
       return;
     }
@@ -345,10 +383,17 @@ export class RdsDecoder {
     const syn = syndrome(this.reg);
     const ok = this.matchesExpected(this.blockIndex, syn);
     this.storeBlock(this.blockIndex, this.reg, ok);
-    this.ber += 0.02 * ((ok ? 0 : 1) - this.ber);
+    this.ber += 0.05 * ((ok ? 0 : 1) - this.ber);
     this.consecBad = ok ? 0 : this.consecBad + 1;
     if (this.blockIndex === 3) this.parseGroup();
-    if (this.consecBad >= 12) this.synced = false; // lost lock — re-hunt
+    if (this.consecBad >= 8) this.loseLock(); // genuine drop, re-acquire cleanly
+  }
+
+  private loseLock() {
+    this.locked = false;
+    this.huntPrevOff = -1;
+    this.huntSince = 0;
+    this.blockValid = [false, false, false, false];
   }
 
   private matchesExpected(idx: number, syn: number): boolean {
@@ -423,9 +468,14 @@ export class RdsDecoder {
     this.rebuildStation();
   }
 
+  // The PI is the station's identity, so it must repeat across two groups before
+  // we trust it — a single CRC-valid-by-chance block can't conjure a station.
   private setPi(pi: number) {
-    this.pi = pi;
-    this.havePi = true;
+    if (pi === this.piCandidate) {
+      this.pi = pi;
+      this.havePi = true;
+    }
+    this.piCandidate = pi;
   }
 
   // PS/RT use a per-character double-buffer: a glyph is only shown once two
@@ -489,6 +539,30 @@ export class RdsDecoder {
   }
 
   stats(): RdsStats {
-    return { groups: this.groups, blockErrorRate: this.ber, synced: this.synced };
+    // "Synced" means a genuine, low-error lock — not merely "haven't given up
+    // hunting yet" — so the panel never shows lock alongside a 100% error rate.
+    return {
+      groups: this.groups,
+      blockErrorRate: this.ber,
+      synced: this.locked && this.ber < 0.5,
+    };
+  }
+
+  /**
+   * One-line health readout for debugging reception, sampled+reset per call.
+   * `sub/mpx` is the fraction of signal energy sitting in the ±2.4 kHz band
+   * around 57 kHz (a present RDS subcarrier shows up here); `matches` is offset
+   * words seen while hunting (≈0 means no recoverable bit structure).
+   */
+  diag(): string {
+    const mpx = this.dMpxN ? this.dMpxAbs / this.dMpxN : 0;
+    const sub = this.dSubN ? this.dSubAbs / this.dSubN : 0;
+    const ratio = mpx > 0 ? (sub / mpx) * 100 : 0;
+    const line =
+      `sub/mpx=${ratio.toFixed(1)}% matches=${this.dMatches} ` +
+      `locked=${this.locked} ber=${(this.ber * 100).toFixed(0)}% ` +
+      `groups=${this.groups} omega=${this.mmOmega.toFixed(2)}/${this.sps.toFixed(2)}`;
+    this.dMpxAbs = this.dMpxN = this.dSubAbs = this.dSubN = this.dMatches = 0;
+    return line;
   }
 }

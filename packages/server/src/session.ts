@@ -694,6 +694,9 @@ export class Radio {
     // fed, so it reports a null station (which clears the client panel).
     if (now - this.lastRds >= RDS_BROADCAST_MS) {
       this.lastRds = now;
+      if (process.env.RDS_DEBUG && this.state.mode === "WFM") {
+        console.log(`[rds] ${this.demod.rdsDiag()}`);
+      }
       this.sinks.json({
         type: "rds",
         station: this.demod.rdsStation(),

@@ -194,6 +194,10 @@ export class Demodulator {
   resetRds() {
     this.rds.reset();
   }
+  /** One-line RDS reception health readout (for debugging). */
+  rdsDiag(): string {
+    return this.rds.diag();
+  }
 
   /** `iq` is interleaved complex at fs, signal of interest centered at DC. */
   process(iq: Float32Array): DemodResult {

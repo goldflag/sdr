@@ -107,7 +107,10 @@ export function RdsPanel({ station, stats, mode }: Props) {
       {mode === "WFM" && stats && (
         <div className="grid grid-cols-3 gap-1.5 border-t border-border/40 pt-2">
           <Stat label="Groups" value={String(stats.groups)} />
-          <Stat label="Errors" value={`${(stats.blockErrorRate * 100).toFixed(0)}%`} />
+          <Stat
+            label="Errors"
+            value={stats.synced ? `${(stats.blockErrorRate * 100).toFixed(0)}%` : "—"}
+          />
           <Stat label="Sync" value={stats.synced ? "lock" : "—"} />
         </div>
       )}
