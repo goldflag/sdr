@@ -5,7 +5,7 @@
 // Colors come from the spectrum data palette in index.css (--trace, --vfo, …),
 // resolved once on mount so the canvas stays in step with the theme.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
 import type { FftFrame, RadioState } from "@sdr/shared";
 import { formatHz } from "@/lib/utils";
 
@@ -13,7 +13,12 @@ interface Props {
   subscribeFft: (cb: (f: FftFrame) => void) => () => void;
   state: RadioState;
   onTune: (offsetHz: number) => void;
+  onPassband: (low: number, high: number) => void;
+  onNotches: (notches: number[]) => void;
 }
+
+const EDGE_GRAB_PX = 7; // pointer distance to grab a filter edge
+const NOTCH_GRAB_PX = 7; // pointer distance to remove a notch
 
 const SPECTRUM_H = 168;
 
@@ -41,7 +46,13 @@ function readPalette(): Palette {
   };
 }
 
-export function SpectrumWaterfall({ subscribeFft, state, onTune }: Props) {
+export function SpectrumWaterfall({
+  subscribeFft,
+  state,
+  onTune,
+  onPassband,
+  onNotches,
+}: Props) {
   const specRef = useRef<HTMLCanvasElement>(null);
   const fallRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -110,8 +121,10 @@ export function SpectrumWaterfall({ subscribeFft, state, onTune }: Props) {
       drawGrid(sctx, w, h, p);
 
       if (!frame) {
+        drawFilterOverlay(sctx, w, h, stateRef.current, p);
         drawFreqAxis(sctx, w, h, stateRef.current, p);
         drawVfo(sctx, w, h, stateRef.current, p);
+        drawNotches(sctx, w, h, stateRef.current);
         return;
       }
 
@@ -157,6 +170,7 @@ export function SpectrumWaterfall({ subscribeFft, state, onTune }: Props) {
 
       drawFreqAxis(sctx, w, h, stateRef.current, p);
       drawVfo(sctx, w, h, stateRef.current, p);
+      drawNotches(sctx, w, h, stateRef.current);
 
       // --- waterfall ---
       const fw = fall.width;
@@ -180,14 +194,101 @@ export function SpectrumWaterfall({ subscribeFft, state, onTune }: Props) {
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  // Pointer tuning: map x within the spectrum to a VFO offset.
-  const tuneFromClientX = (clientX: number) => {
+  // Pointer interaction. A click can tune the VFO, drag a filter edge (passband
+  // tuning), ⇧-drag to shift the whole passband (IF shift), or ⌥-click to add /
+  // remove a notch. We hit-test against the live state via stateRef.
+  const drag = useRef<{
+    kind: "tune" | "low" | "high" | "shift";
+    startFrac: number;
+    startLow: number;
+    startHigh: number;
+  } | null>(null);
+
+  const fracFromClientX = (clientX: number): number => {
+    const rect = specRef.current!.getBoundingClientRect();
+    return Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  };
+
+  const toggleNotch = (frac: number, w: number) => {
+    const s = stateRef.current;
+    const px = frac * w;
+    const hz = s.centerHz + (frac - 0.5) * s.sampleRate;
+    const near = s.notches.find(
+      (n) => Math.abs(offsetX(w, s, n - s.centerHz) - px) <= NOTCH_GRAB_PX,
+    );
+    if (near != null) onNotches(s.notches.filter((n) => n !== near));
+    else onNotches([...s.notches, Math.round(hz)]);
+  };
+
+  const onDown = (e: ReactPointerEvent) => {
     const spec = specRef.current;
     if (!spec) return;
-    const rect = spec.getBoundingClientRect();
-    const frac = (clientX - rect.left) / rect.width;
-    const offset = (frac - 0.5) * stateRef.current.sampleRate;
-    onTune(Math.round(offset));
+    spec.setPointerCapture(e.pointerId);
+    const s = stateRef.current;
+    const w = spec.getBoundingClientRect().width;
+    const frac = fracFromClientX(e.clientX);
+    const x = frac * w;
+
+    if (e.altKey) {
+      toggleNotch(frac, w);
+      return;
+    }
+    const base = {
+      startFrac: frac,
+      startLow: s.filterLow,
+      startHigh: s.filterHigh,
+    };
+    if (e.shiftKey) {
+      drag.current = { kind: "shift", ...base };
+      return;
+    }
+    const xLow = offsetX(w, s, s.vfoOffset + s.filterLow);
+    const xHigh = offsetX(w, s, s.vfoOffset + s.filterHigh);
+    if (Math.abs(x - xLow) <= EDGE_GRAB_PX) drag.current = { kind: "low", ...base };
+    else if (Math.abs(x - xHigh) <= EDGE_GRAB_PX)
+      drag.current = { kind: "high", ...base };
+    else {
+      drag.current = { kind: "tune", ...base };
+      onTune(Math.round((frac - 0.5) * s.sampleRate));
+    }
+  };
+
+  const onMove = (e: ReactPointerEvent) => {
+    const spec = specRef.current;
+    if (!spec) return;
+    const s = stateRef.current;
+    const w = spec.getBoundingClientRect().width;
+
+    if (e.buttons !== 1 || !drag.current) {
+      // hover cursor hint
+      const frac = fracFromClientX(e.clientX);
+      const x = frac * w;
+      const near =
+        Math.abs(x - offsetX(w, s, s.vfoOffset + s.filterLow)) <= EDGE_GRAB_PX ||
+        Math.abs(x - offsetX(w, s, s.vfoOffset + s.filterHigh)) <= EDGE_GRAB_PX;
+      spec.style.cursor = e.altKey ? "cell" : near ? "ew-resize" : "crosshair";
+      return;
+    }
+
+    const frac = fracFromClientX(e.clientX);
+    const offFromVfo = (frac - 0.5) * s.sampleRate - s.vfoOffset;
+    const d = drag.current;
+    switch (d.kind) {
+      case "tune":
+        onTune(Math.round((frac - 0.5) * s.sampleRate));
+        break;
+      case "low":
+        onPassband(Math.min(offFromVfo, s.filterHigh - 50), s.filterHigh);
+        break;
+      case "high":
+        onPassband(s.filterLow, Math.max(offFromVfo, s.filterLow + 50));
+        break;
+      case "shift": {
+        const delta = (frac - d.startFrac) * s.sampleRate;
+        onPassband(d.startLow + delta, d.startHigh + delta);
+        break;
+      }
+    }
   };
 
   return (
@@ -199,13 +300,9 @@ export function SpectrumWaterfall({ subscribeFft, state, onTune }: Props) {
         ref={specRef}
         className="block w-full cursor-crosshair"
         style={{ height: SPECTRUM_H }}
-        onPointerDown={(e) => {
-          (e.target as HTMLElement).setPointerCapture(e.pointerId);
-          tuneFromClientX(e.clientX);
-        }}
-        onPointerMove={(e) => {
-          if (e.buttons === 1) tuneFromClientX(e.clientX);
-        }}
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={() => (drag.current = null)}
         onWheel={(e) => {
           const step = e.shiftKey ? 1000 : 100;
           onTune(stateRef.current.vfoOffset - Math.sign(e.deltaY) * step);
@@ -220,6 +317,11 @@ export function SpectrumWaterfall({ subscribeFft, state, onTune }: Props) {
 
 function vfoX(w: number, s: RadioState): number {
   return ((s.vfoOffset + s.sampleRate / 2) / s.sampleRate) * w;
+}
+
+/** Pixel x for a frequency offset (Hz) from the captured-band centre. */
+function offsetX(w: number, s: RadioState, offsetFromCenterHz: number): number {
+  return ((offsetFromCenterHz + s.sampleRate / 2) / s.sampleRate) * w;
 }
 
 function drawGrid(
@@ -251,14 +353,56 @@ function drawFilterOverlay(
   s: RadioState,
   p: Palette,
 ) {
-  const x = vfoX(w, s);
-  const halfPx = (s.bandwidth / 2 / s.sampleRate) * w;
-  let x0 = x - halfPx;
-  let x1 = x + halfPx;
-  if (s.mode === "USB") x0 = x;
-  if (s.mode === "LSB") x1 = x;
+  const x0 = offsetX(w, s, s.vfoOffset + s.filterLow);
+  const x1 = offsetX(w, s, s.vfoOffset + s.filterHigh);
   ctx.fillStyle = p.vfoFill;
   ctx.fillRect(x0, 0, Math.max(1, x1 - x0), h);
+
+  // Draggable edge handles.
+  ctx.strokeStyle = p.vfo;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const ex of [x0, x1]) {
+    ctx.moveTo(Math.round(ex) + 0.5, 0);
+    ctx.lineTo(Math.round(ex) + 0.5, h);
+  }
+  ctx.stroke();
+  ctx.fillStyle = p.vfo;
+  for (const ex of [x0, x1]) ctx.fillRect(Math.round(ex) - 1, h / 2 - 9, 3, 18);
+}
+
+const NOTCH_COLOR = "oklch(0.7 0.19 25)"; // red
+
+function drawNotches(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  s: RadioState,
+) {
+  if (!s.notches.length) return;
+  ctx.save();
+  ctx.strokeStyle = NOTCH_COLOR;
+  ctx.fillStyle = NOTCH_COLOR;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  for (const hz of s.notches) {
+    const x = offsetX(w, s, hz - s.centerHz);
+    if (x < -2 || x > w + 2) continue;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(x) + 0.5, 0);
+    ctx.lineTo(Math.round(x) + 0.5, h);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.font = "9px ui-monospace, 'SF Mono', Menlo, monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  for (const hz of s.notches) {
+    const x = offsetX(w, s, hz - s.centerHz);
+    if (x < -2 || x > w + 2) continue;
+    ctx.fillText("⊘", Math.round(x), 2);
+  }
+  ctx.restore();
 }
 
 function drawVfo(

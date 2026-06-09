@@ -3,18 +3,32 @@
 // session's VFO NCO does that). Output is mono audio at AUDIO_RATE plus the
 // in-channel power in dB (for squelch / S-meter).
 //
-// Pipeline: ComplexDecimator (fs -> channelRate) -> mode demod -> LinearResampler.
+// Pipeline per block:
+//   ComplexDecimator (fs -> channelRate)
+//     -> [noise blanker]  (impulse removal, complex)
+//     -> [notch cascade]  (kill carriers/hets, complex)
+//     -> mode demod        (FM / AM / SSB-CW via a generalised Weaver stage)
+//     -> audio low-pass
+//     -> [noise reduction] (LMS, audio)
+//     -> [audio AGC]
+//     -> LinearResampler (-> AUDIO_RATE)
+//
+// The channel filter is described by two edges (low, high) in Hz relative to the
+// VFO, so the passband can be tuned/shifted asymmetrically. AM/SSB/CW share one
+// "shift to passband centre, low-pass the half-width, shift back" core.
 
-import type { Mode } from "@sdr/shared";
+import type { AgcMode, Mode } from "@sdr/shared";
 import { AUDIO_RATE } from "@sdr/shared";
 import {
   ComplexDecimator,
+  ComplexNotch,
   RealFir,
   designLowpass,
   tapsFor,
 } from "./filters";
 import { LinearResampler } from "./resample";
 import { Nco } from "./nco";
+import { AudioAgc, LmsDenoiser, NoiseBlanker } from "./enhance";
 
 /** Target intermediate (channel) rate per mode, before final resample to 48k. */
 const TARGET_IF: Record<Mode, number> = {
@@ -57,34 +71,41 @@ export class Demodulator {
   private dcPrevOut = 0;
   // Audio shaping FIR
   private audioFir!: RealFir;
-  // SSB/CW Weaver state
-  private weaverDown = new Nco(256_000, 0);
-  private weaverUp = new Nco(256_000, 0);
-  private ssbI!: RealFir;
-  private ssbQ!: RealFir;
+  // Passband (Weaver) stage: shift by centre, low-pass half-width, shift back.
+  private passDown = new Nco(256_000, 0);
+  private passUp = new Nco(256_000, 0);
+  private passI!: RealFir;
+  private passQ!: RealFir;
+
+  // Enhancement stages (bypassed unless enabled).
+  private nb = new NoiseBlanker();
+  private nbOn = false;
+  private nr = new LmsDenoiser();
+  private nrOn = false;
+  private agc = new AudioAgc();
+  private agcMode: AgcMode = "off";
+  private notchOffsets: number[] = []; // Hz relative to VFO
+  private notches: ComplexNotch[] = [];
 
   constructor() {
-    this.configure("WFM", 1_024_000, 200_000);
+    const bw = 200_000;
+    this.configure("WFM", 1_024_000, -bw / 2, bw / 2);
   }
 
-  configure(mode: Mode, fs: number, bandwidth: number) {
+  configure(mode: Mode, fs: number, low: number, high: number) {
     this.mode = mode;
+    if (high <= low) high = low + 1;
+    const width = high - low;
+    const center = (low + high) / 2;
 
     const target = TARGET_IF[mode];
     const decim = Math.max(1, Math.round(fs / target));
     this.channelRate = fs / decim;
 
-    // Decimation low-pass cutoff. SSB/CW pass the full ±bw so the Weaver stage
-    // can select a sideband; other modes pass bw/2.
-    const wideForSsb = mode === "USB" || mode === "LSB" || mode === "CW";
-    const cutoff = Math.min(
-      wideForSsb ? bandwidth : bandwidth / 2,
-      this.channelRate * 0.45,
-    );
-    const transNorm = Math.max(
-      (this.channelRate * 0.5 - cutoff) / fs,
-      0.0008,
-    );
+    // Decimation low-pass must pass the whole passband (its furthest edge from DC).
+    const maxExtent = Math.max(Math.abs(low), Math.abs(high), width / 2);
+    const cutoff = Math.min(maxExtent, this.channelRate * 0.45);
+    const transNorm = Math.max((this.channelRate * 0.5 - cutoff) / fs, 0.0008);
     let taps = tapsFor(transNorm);
     if (taps > MAX_DECIM_TAPS) taps = MAX_DECIM_TAPS;
     this.decim = new ComplexDecimator(designLowpass(taps, cutoff / fs), decim);
@@ -94,9 +115,9 @@ export class Demodulator {
     // Audio post-filter cutoff per mode.
     let audioCut: number;
     if (mode === "WFM") audioCut = 15_000;
-    else if (mode === "NFM") audioCut = Math.min(4_000, bandwidth / 2);
-    else if (mode === "AM") audioCut = Math.min(bandwidth / 2, 6_000);
-    else audioCut = Math.min(bandwidth, 3_500); // SSB/CW
+    else if (mode === "NFM") audioCut = Math.min(4_000, width / 2);
+    else if (mode === "AM") audioCut = Math.min(width / 2, 6_000);
+    else audioCut = Math.min(width, 3_500); // SSB/CW
     audioCut = Math.min(audioCut, this.channelRate * 0.45);
     this.audioFir = new RealFir(
       designLowpass(tapsFor(0.05), audioCut / this.channelRate),
@@ -105,18 +126,49 @@ export class Demodulator {
     // De-emphasis coefficient (WFM).
     this.deemphA = 1 - Math.exp(-1 / (this.channelRate * DEEMPHASIS_TAU));
 
-    // Weaver SSB: offset = bw/2, complex LPF cutoff = bw/2.
-    const fo = bandwidth / 2;
-    this.weaverDown = new Nco(this.channelRate, -fo);
-    this.weaverUp = new Nco(this.channelRate, fo);
-    const ssbTaps = designLowpass(tapsFor(0.04), (bandwidth / 2) / this.channelRate);
-    this.ssbI = new RealFir(ssbTaps);
-    this.ssbQ = new RealFir(ssbTaps.slice());
+    // Generalised Weaver passband: shift centre -> DC, low-pass ±width/2.
+    this.passDown = new Nco(this.channelRate, -center);
+    this.passUp = new Nco(this.channelRate, center);
+    const passTaps = designLowpass(tapsFor(0.04), width / 2 / this.channelRate);
+    this.passI = new RealFir(passTaps);
+    this.passQ = new RealFir(passTaps.slice());
+
+    if (this.agcMode !== "off") this.agc.configure(this.channelRate, this.agcMode);
+    this.rebuildNotches();
 
     // reset transient state
     this.prevI = this.prevQ = 0;
     this.deemph = 0;
     this.dcPrevIn = this.dcPrevOut = 0;
+  }
+
+  // --- enhancement setters ---
+
+  setNr(on: boolean, level?: number) {
+    this.nrOn = on;
+    if (level != null) this.nr.setLevel(level);
+    if (on) this.nr.reset();
+  }
+  setNb(on: boolean, threshold?: number) {
+    this.nbOn = on;
+    if (threshold != null) this.nb.setThreshold(threshold);
+  }
+  setAgc(mode: AgcMode) {
+    this.agcMode = mode;
+    if (mode !== "off") {
+      this.agc.configure(this.channelRate, mode);
+      this.agc.reset();
+    }
+  }
+  /** Notch positions as Hz offsets from the VFO (DC). */
+  setNotchOffsets(offsets: number[]) {
+    this.notchOffsets = offsets;
+    this.rebuildNotches();
+  }
+  private rebuildNotches() {
+    this.notches = this.notchOffsets.map(
+      (off) => new ComplexNotch(off, this.channelRate),
+    );
   }
 
   /** `iq` is interleaved complex at fs, signal of interest centered at DC. */
@@ -126,6 +178,9 @@ export class Demodulator {
     const powerDb = channelPowerDb(ch);
     if (n === 0) return { audio: new Float32Array(0), powerDb };
 
+    if (this.nbOn) this.nb.process(ch);
+    for (const notch of this.notches) notch.process(ch);
+
     let audioCh: Float32Array;
     switch (this.mode) {
       case "WFM":
@@ -133,18 +188,20 @@ export class Demodulator {
         audioCh = this.demodFm(ch, n);
         break;
       case "AM":
-        audioCh = this.demodAm(ch, n);
+        audioCh = this.demodPassband(ch, n, true);
         break;
       case "USB":
       case "LSB":
       case "CW":
-        audioCh = this.demodSsb(ch, n, this.mode === "LSB");
+        audioCh = this.demodPassband(ch, n, false);
         break;
       default:
         audioCh = new Float32Array(n);
     }
 
-    const shaped = this.audioFir.process(audioCh);
+    let shaped = this.audioFir.process(audioCh);
+    if (this.nrOn) shaped = this.nr.process(shaped);
+    if (this.agcMode !== "off") shaped = this.agc.process(shaped);
     const audio = this.resampler.process(shaped);
     return { audio, powerDb };
   }
@@ -181,54 +238,46 @@ export class Demodulator {
     return out;
   }
 
-  private demodAm(ch: Float32Array, n: number): Float32Array {
-    const out = new Float32Array(n);
-    let pin = this.dcPrevIn;
-    let pout = this.dcPrevOut;
-    for (let k = 0; k < n; k++) {
-      const i = ch[2 * k]!;
-      const q = ch[2 * k + 1]!;
-      const env = Math.hypot(i, q);
-      // DC block: y[n] = x[n] - x[n-1] + r*y[n-1]
-      const y = env - pin + 0.999 * pout;
-      pin = env;
-      pout = y;
-      out[k] = y;
-    }
-    this.dcPrevIn = pin;
-    this.dcPrevOut = pout;
-    return out;
-  }
-
-  // Weaver third-method SSB: shift the wanted sideband to DC, complex low-pass,
-  // shift back and take the real part. `lsb` flips the mixing direction.
-  private demodSsb(ch: Float32Array, n: number, lsb: boolean): Float32Array {
-    const down = new Float32Array(ch.length);
-    // mix down by fo (USB) / up by fo (LSB)
-    if (lsb) this.weaverUp.mix(ch, down);
-    else this.weaverDown.mix(ch, down);
-
-    // split to real I/Q, low-pass each (complex low-pass), recombine
+  // Generalised Weaver passband demod, shared by AM and SSB/CW. Shifts the
+  // passband centre to DC, low-passes the half-width (sharp channel filter), then
+  // either envelope-detects (AM) or shifts back and takes the real part (SSB/CW).
+  // `center` (the IF shift) is baked into passDown/passUp at configure time.
+  private demodPassband(ch: Float32Array, n: number, am: boolean): Float32Array {
+    const down = this.passDown.mix(ch, new Float32Array(ch.length));
     const I = new Float32Array(n);
     const Q = new Float32Array(n);
     for (let k = 0; k < n; k++) {
       I[k] = down[2 * k]!;
       Q[k] = down[2 * k + 1]!;
     }
-    const Ilp = this.ssbI.process(I);
-    const Qlp = this.ssbQ.process(Q);
+    const Ilp = this.passI.process(I);
+    const Qlp = this.passQ.process(Q);
 
+    const out = new Float32Array(n);
+    if (am) {
+      // Envelope detection is non-coherent, so the IF shift doesn't matter; an
+      // asymmetric passband simply trims one sideband. DC-block the result.
+      let pin = this.dcPrevIn;
+      let pout = this.dcPrevOut;
+      for (let k = 0; k < n; k++) {
+        const env = Math.hypot(Ilp[k]!, Qlp[k]!);
+        const y = env - pin + 0.999 * pout;
+        pin = env;
+        pout = y;
+        out[k] = y;
+      }
+      this.dcPrevIn = pin;
+      this.dcPrevOut = pout;
+      return out;
+    }
+
+    // SSB/CW: shift the selected passband back up and take the real part.
     const recomb = new Float32Array(ch.length);
     for (let k = 0; k < n; k++) {
       recomb[2 * k] = Ilp[k]!;
       recomb[2 * k + 1] = Qlp[k]!;
     }
-    // mix back up (USB) / down (LSB) and take real part
-    const up = new Float32Array(ch.length);
-    if (lsb) this.weaverDown.mix(recomb, up);
-    else this.weaverUp.mix(recomb, up);
-
-    const out = new Float32Array(n);
+    const up = this.passUp.mix(recomb, new Float32Array(ch.length));
     for (let k = 0; k < n; k++) out[k] = up[2 * k]! * 2; // *2 restores level
     return out;
   }

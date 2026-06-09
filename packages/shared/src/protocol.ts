@@ -25,6 +25,31 @@ export const DEFAULT_BANDWIDTH: Record<Mode, number> = {
 /** Audio sample rate produced by the server demodulators. */
 export const AUDIO_RATE = 48_000;
 
+/** Centre audio pitch (Hz) of the CW passband, so a tuned carrier beats here. */
+export const CW_TONE = 600;
+
+/** Audio AGC speed presets (attack/decay/hang are baked into each). */
+export const AGC_MODES = ["off", "fast", "medium", "slow"] as const;
+export type AgcMode = (typeof AGC_MODES)[number];
+
+/**
+ * Default channel filter edges (Hz, relative to the tuned VFO) for a mode at a
+ * given bandwidth. SSB is single-sided; CW sits around the CW beat tone; AM/FM
+ * are symmetric. Edges can then be dragged independently (passband tuning).
+ */
+export function defaultEdges(mode: Mode, bw: number): [number, number] {
+  switch (mode) {
+    case "USB":
+      return [0, bw];
+    case "LSB":
+      return [-bw, 0];
+    case "CW":
+      return [CW_TONE - bw / 2, CW_TONE + bw / 2];
+    default:
+      return [-bw / 2, bw / 2]; // WFM, NFM, AM
+  }
+}
+
 /** ADS-B (Mode S extended squitter) operating point. */
 export const ADSB_FREQ_HZ = 1_090_000_000;
 export const ADSB_SAMPLE_RATE = 2_000_000; // 2 samples per Mode S bit
@@ -91,8 +116,18 @@ export type ClientMessage =
   /** Dongle sample rate in Hz (== captured bandwidth). */
   | { type: "setSampleRate"; hz: number }
   | { type: "setMode"; mode: Mode }
-  /** Channel filter bandwidth in Hz. */
+  /** Channel filter bandwidth in Hz (recentres the passband symmetrically). */
   | { type: "setBandwidth"; hz: number }
+  /** Set the channel filter edges directly (passband tuning / IF shift), Hz from VFO. */
+  | { type: "setPassband"; low: number; high: number }
+  /** Audio noise reduction (LMS). */
+  | { type: "setNr"; on: boolean; level?: number }
+  /** Impulse noise blanker. */
+  | { type: "setNb"; on: boolean; threshold?: number }
+  /** Audio AGC speed. */
+  | { type: "setAgc"; mode: AgcMode }
+  /** Manual notch filters, as absolute RF frequencies in Hz. */
+  | { type: "setNotches"; notches: number[] }
   /** Gain control: auto AGC, or a manual gain in dB (snapped to a tuner step). */
   | { type: "setGain"; mode: "auto" | "manual"; db?: number }
   /** Squelch threshold in dB of channel power; null disables squelch. */
@@ -142,6 +177,9 @@ export interface RadioState {
   sampleRate: number;
   mode: Mode;
   bandwidth: number;
+  /** Channel filter edges, Hz relative to the VFO (low < high). */
+  filterLow: number;
+  filterHigh: number;
   vfoOffset: number;
   gainMode: "auto" | "manual";
   gainDb: number;
@@ -149,6 +187,16 @@ export interface RadioState {
   ppm: number;
   biasTee: boolean;
   directSampling: DirectSampling;
+  /** Audio noise reduction. */
+  nrOn: boolean;
+  nrLevel: number; // 0..1
+  /** Impulse noise blanker. */
+  nbOn: boolean;
+  nbThreshold: number; // spike threshold, × running mean
+  /** Audio AGC speed. */
+  agc: AgcMode;
+  /** Manual notch filters, absolute RF frequencies in Hz. */
+  notches: number[];
   /** When true the radio is decoding ADS-B (1090 MHz) instead of audio. */
   adsb: boolean;
 }
@@ -275,6 +323,8 @@ export const DEFAULT_STATE: RadioState = {
   sampleRate: 1_024_000,
   mode: "WFM",
   bandwidth: DEFAULT_BANDWIDTH.WFM,
+  filterLow: -DEFAULT_BANDWIDTH.WFM / 2,
+  filterHigh: DEFAULT_BANDWIDTH.WFM / 2,
   vfoOffset: 0,
   gainMode: "auto",
   gainDb: 0,
@@ -282,5 +332,11 @@ export const DEFAULT_STATE: RadioState = {
   ppm: 0,
   biasTee: false,
   directSampling: DIRECT_SAMPLING.OFF,
+  nrOn: false,
+  nrLevel: 0.5,
+  nbOn: false,
+  nbThreshold: 4,
+  agc: "off",
+  notches: [],
   adsb: false,
 };

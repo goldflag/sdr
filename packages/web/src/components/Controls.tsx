@@ -1,9 +1,11 @@
 import { useState, type ReactNode } from "react";
 import {
+  type AgcMode,
   type ClientMessage,
   type DeviceInfo,
   type Mode,
   type RadioState,
+  AGC_MODES,
   DIRECT_SAMPLING,
   SAMPLE_RATES,
 } from "@sdr/shared";
@@ -18,8 +20,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { SignalState } from "@/lib/ws";
-import { Volume2, AlertTriangle, ChevronRight } from "lucide-react";
+import { Volume2, AlertTriangle, ChevronRight, Info } from "lucide-react";
 
 interface Props {
   state: RadioState;
@@ -60,6 +67,7 @@ export function Controls(p: Props) {
         <Field
           label="Bandwidth"
           value={`${(state.bandwidth / 1000).toFixed(state.bandwidth < 10_000 ? 2 : 1)} kHz`}
+          info="Width of the channel filter. Narrower rejects more adjacent interference but thins the audio; wider sounds fuller but lets in more noise and neighbouring signals."
         >
           <Slider
             value={[state.bandwidth]}
@@ -72,10 +80,36 @@ export function Controls(p: Props) {
           />
         </Field>
 
+        <div className="flex items-baseline justify-between">
+          <Label className="flex items-center gap-1 text-xs">
+            Passband
+            <InfoTip>
+              The filter's low and high edges relative to the tuned frequency.
+              Drag either edge on the spectrum to shape it asymmetrically (e.g.
+              to dodge interference on one side); ⇧-drag to slide both together
+              (IF shift).
+            </InfoTip>
+          </Label>
+          <span className="font-mono text-[11px] text-foreground/70">
+            {fmtEdge(state.filterLow)} … {fmtEdge(state.filterHigh)}
+          </span>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Drag the filter edges on the spectrum (⇧-drag to shift); ⌥-click to
+          add or remove a notch.
+        </p>
+
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center justify-between">
             <Label className="flex items-center gap-2 text-xs">
-              Squelch
+              <span className="flex items-center gap-1">
+                Squelch
+                <InfoTip>
+                  Mutes the audio until channel power exceeds this threshold, so
+                  you don't sit listening to hiss between transmissions. Raise it
+                  just above the idle noise level.
+                </InfoTip>
+              </span>
               <span
                 className={`size-1.5 rounded-full transition-colors ${
                   signal?.squelchOpen
@@ -112,6 +146,71 @@ export function Controls(p: Props) {
         </div>
       </Section>
 
+      <Section title="Noise &amp; dynamics">
+        <SwitchRow
+          label="Noise reduction"
+          info="Adaptive (LMS) suppression of steady background hiss while keeping voice, tones and CW intact. Higher strength removes more noise but can sound watery on weak signals."
+          value={state.nrOn ? `${Math.round(state.nrLevel * 100)}%` : "off"}
+          checked={state.nrOn}
+          onCheckedChange={(on) =>
+            send({ type: "setNr", on, level: state.nrLevel })
+          }
+        />
+        {state.nrOn && (
+          <Slider
+            value={[state.nrLevel]}
+            min={0}
+            max={1}
+            step={0.01}
+            onValueChange={([v]) =>
+              v != null && send({ type: "setNr", on: true, level: v })
+            }
+          />
+        )}
+
+        <SwitchRow
+          label="Noise blanker"
+          info="Removes short impulse noise — ignition crackle, power-line arcing, electric-fence ticks — before demodulation. A lower threshold blanks more aggressively (but can dull strong signals)."
+          value={state.nbOn ? `${state.nbThreshold.toFixed(1)}×` : "off"}
+          checked={state.nbOn}
+          onCheckedChange={(on) =>
+            send({ type: "setNb", on, threshold: state.nbThreshold })
+          }
+        />
+        {state.nbOn && (
+          <Slider
+            value={[state.nbThreshold]}
+            min={2}
+            max={12}
+            step={0.5}
+            onValueChange={([v]) =>
+              v != null && send({ type: "setNb", on: true, threshold: v })
+            }
+          />
+        )}
+
+        <Field
+          label="Audio AGC"
+          info="Automatically evens out loudness as signals fade or vary, like a receiver's audio AGC. Fast reacts quickly (good for SSB/CW); Slow is smoother for voice. Each preset sets the attack/decay/hang timing. Separate from the tuner's RF gain."
+        >
+          <Select
+            value={state.agc}
+            onValueChange={(v) => send({ type: "setAgc", mode: v as AgcMode })}
+          >
+            <SelectTrigger className={SELECT_TRIGGER}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {AGC_MODES.map((m) => (
+                <SelectItem key={m} value={m}>
+                  {m[0]!.toUpperCase() + m.slice(1)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+      </Section>
+
       <Section title="Audio">
         {p.audioRunning ? (
           <Field label="Volume" value={`${Math.round(p.volume * 100)}%`}>
@@ -132,7 +231,14 @@ export function Controls(p: Props) {
 
       <Section title="Gain">
         <div className="flex items-center justify-between">
-          <Label className="text-xs">Tuner AGC</Label>
+          <Label className="flex items-center gap-1 text-xs">
+            Tuner AGC
+            <InfoTip>
+              Lets the dongle set its own front-end RF gain automatically. Switch
+              off to set the gain by hand, which usually gives the best
+              signal-to-noise on a known signal.
+            </InfoTip>
+          </Label>
           <div className="flex items-center gap-2">
             <span className="font-mono text-[11px] text-muted-foreground">
               {state.gainMode === "auto" ? "auto" : "manual"}
@@ -151,7 +257,11 @@ export function Controls(p: Props) {
           </div>
         </div>
         {state.gainMode === "manual" && gains.length > 0 && (
-          <Field label="Gain" value={`${state.gainDb.toFixed(1)} dB`}>
+          <Field
+            label="Gain"
+            value={`${state.gainDb.toFixed(1)} dB`}
+            info="Front-end RF amplification. Higher gain pulls in weak signals, but too much overloads the tuner on strong ones, creating spurs and distortion across the band."
+          >
             <Slider
               value={[nearestGainIndex(gains, state.gainDb)]}
               min={0}
@@ -171,7 +281,10 @@ export function Controls(p: Props) {
       </Section>
 
       <Section title="Device" aside={deviceInfo?.tunerName ?? "no dongle"}>
-        <Field label="Sample rate">
+        <Field
+          label="Sample rate"
+          info="How much bandwidth the dongle captures at once — this is the full width of the spectrum/waterfall. Higher shows more at once and allows wider FM, but uses more CPU."
+        >
           <Select
             value={String(state.sampleRate)}
             onValueChange={(v) => send({ type: "setSampleRate", hz: Number(v) })}
@@ -189,7 +302,11 @@ export function Controls(p: Props) {
           </Select>
         </Field>
 
-        <Field label="Direct sampling" hint="HF reception below ~24 MHz">
+        <Field
+          label="Direct sampling"
+          hint="HF reception below ~24 MHz"
+          info="Bypasses the tuner so the RTL-SDR V3 can receive HF (shortwave, below ~24 MHz). Use Q-branch for HF; leave Off for normal VHF/UHF reception."
+        >
           <Select
             value={String(state.directSampling)}
             onValueChange={(v) =>
@@ -213,7 +330,11 @@ export function Controls(p: Props) {
           </Select>
         </Field>
 
-        <Field label="Frequency correction" value={`${state.ppm} ppm`}>
+        <Field
+          label="Frequency correction"
+          value={`${state.ppm} ppm`}
+          info="Compensates for the dongle's crystal error. If stations appear slightly off their known frequency, nudge this until they line up."
+        >
           <Slider
             value={[state.ppm]}
             min={-100}
@@ -224,7 +345,14 @@ export function Controls(p: Props) {
         </Field>
 
         <div className="flex items-center justify-between">
-          <Label className="text-xs">Bias tee (4.5 V)</Label>
+          <Label className="flex items-center gap-1 text-xs">
+            Bias tee (4.5 V)
+            <InfoTip>
+              Sends 4.5 V up the antenna cable to power an external LNA or active
+              antenna. Leave off unless your hardware needs it — never enable it
+              with a plain antenna or a transmitter connected.
+            </InfoTip>
+          </Label>
           <Switch
             size="sm"
             checked={state.biasTee}
@@ -327,17 +455,22 @@ export function Field({
   label,
   value,
   hint,
+  info,
   children,
 }: {
   label: string;
   value?: string;
   hint?: string;
+  info?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-baseline justify-between">
-        <Label className="text-xs">{label}</Label>
+        <Label className="flex items-center gap-1 text-xs">
+          {label}
+          {info && <InfoTip>{info}</InfoTip>}
+        </Label>
         {value && (
           <span className="font-mono text-[11px] text-foreground/70">
             {value}
@@ -348,6 +481,61 @@ export function Field({
       {hint && <p className="text-[11px] text-muted-foreground">{hint}</p>}
     </div>
   );
+}
+
+/** Small "?" affordance that reveals an explanatory tooltip on hover/focus. */
+export function InfoTip({ children }: { children: ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label="More information"
+          className="inline-flex text-muted-foreground/45 transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none"
+        >
+          <Info className="size-3" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{children}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function SwitchRow({
+  label,
+  value,
+  checked,
+  onCheckedChange,
+  info,
+}: {
+  label: string;
+  value: string;
+  checked: boolean;
+  onCheckedChange: (on: boolean) => void;
+  info?: ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between">
+      <Label className="flex items-center gap-1 text-xs">
+        {label}
+        {info && <InfoTip>{info}</InfoTip>}
+      </Label>
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-[11px] text-muted-foreground">
+          {value}
+        </span>
+        <Switch size="sm" checked={checked} onCheckedChange={onCheckedChange} />
+      </div>
+    </div>
+  );
+}
+
+/** Format a filter-edge offset (Hz from the VFO) compactly, e.g. "+2.7k". */
+function fmtEdge(hz: number): string {
+  const sign = hz > 0 ? "+" : hz < 0 ? "−" : "";
+  const a = Math.abs(hz);
+  const s = a >= 1000 ? `${(a / 1000).toFixed(a % 1000 ? 1 : 0)}k` : `${a}`;
+  return `${sign}${s}`;
 }
 
 // --- segmented S-meter -----------------------------------------------------

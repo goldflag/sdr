@@ -5,7 +5,7 @@
 // audio tone (and the spectrum peak) lands where it should.
 
 import FFT from "fft.js";
-import { AUDIO_RATE } from "@sdr/shared";
+import { AUDIO_RATE, defaultEdges } from "@sdr/shared";
 import { Demodulator } from "./demod";
 import { SpectrumAnalyzer } from "./fft";
 
@@ -90,7 +90,7 @@ const TONE = 1000; // audio test tone
     return [Math.cos(ph), Math.sin(ph)];
   });
   const d = new Demodulator();
-  d.configure("NFM", FS, 12_500);
+  d.configure("NFM", FS, ...defaultEdges("NFM", 12_500));
   const { audio } = d.process(iq);
   check("NFM tone", peakHz(audio, AUDIO_RATE), TONE, 60);
 }
@@ -100,7 +100,7 @@ const TONE = 1000; // audio test tone
   const m = 0.5;
   const iq = makeIq(N, (t) => [(1 + m * Math.cos(2 * Math.PI * TONE * t)), 0]);
   const d = new Demodulator();
-  d.configure("AM", FS, 10_000);
+  d.configure("AM", FS, ...defaultEdges("AM", 10_000));
   const { audio } = d.process(iq);
   check("AM tone", peakHz(audio, AUDIO_RATE), TONE, 60);
 }
@@ -112,7 +112,7 @@ const TONE = 1000; // audio test tone
     Math.sin(2 * Math.PI * TONE * t),
   ]);
   const d = new Demodulator();
-  d.configure("USB", FS, 2_700);
+  d.configure("USB", FS, ...defaultEdges("USB", 2_700));
   const { audio } = d.process(iq);
   check("USB tone", peakHz(audio, AUDIO_RATE), TONE, 80);
 }
@@ -124,7 +124,7 @@ const TONE = 1000; // audio test tone
     -Math.sin(2 * Math.PI * TONE * t),
   ]);
   const d = new Demodulator();
-  d.configure("LSB", FS, 2_700);
+  d.configure("LSB", FS, ...defaultEdges("LSB", 2_700));
   const { audio } = d.process(iq);
   check("LSB tone", peakHz(audio, AUDIO_RATE), TONE, 80);
 }

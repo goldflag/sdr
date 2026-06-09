@@ -15,6 +15,7 @@ import {
   DEFAULT_STATE,
   DIRECT_SAMPLING,
   TUNER_NAME,
+  defaultEdges,
   encodeAudioFrame,
   encodeFftFrame,
   gainStepsDb,
@@ -149,6 +150,7 @@ export class Radio {
       case "setFrequency":
         this.state.centerHz = msg.hz;
         this.client?.setFrequency(msg.hz);
+        this.syncNotches();
         break;
       case "setSampleRate":
         this.state.sampleRate = msg.hz;
@@ -156,14 +158,46 @@ export class Radio {
         this.vfo.setSampleRate(msg.hz);
         this.reconfigureDemod();
         break;
-      case "setMode":
+      case "setMode": {
         this.state.mode = msg.mode;
         this.state.bandwidth = DEFAULT_BANDWIDTH[msg.mode];
+        const [lo, hi] = defaultEdges(msg.mode, this.state.bandwidth);
+        this.state.filterLow = lo;
+        this.state.filterHigh = hi;
         this.reconfigureDemod();
         break;
-      case "setBandwidth":
+      }
+      case "setBandwidth": {
         this.state.bandwidth = msg.hz;
+        const [lo, hi] = defaultEdges(this.state.mode, msg.hz);
+        this.state.filterLow = lo;
+        this.state.filterHigh = hi;
         this.reconfigureDemod();
+        break;
+      }
+      case "setPassband":
+        this.state.filterLow = Math.round(Math.min(msg.low, msg.high));
+        this.state.filterHigh = Math.round(Math.max(msg.low, msg.high));
+        this.state.bandwidth = this.state.filterHigh - this.state.filterLow;
+        this.reconfigureDemod();
+        break;
+      case "setNr":
+        this.state.nrOn = msg.on;
+        if (msg.level != null) this.state.nrLevel = msg.level;
+        this.demod.setNr(this.state.nrOn, this.state.nrLevel);
+        break;
+      case "setNb":
+        this.state.nbOn = msg.on;
+        if (msg.threshold != null) this.state.nbThreshold = msg.threshold;
+        this.demod.setNb(this.state.nbOn, this.state.nbThreshold);
+        break;
+      case "setAgc":
+        this.state.agc = msg.mode;
+        this.demod.setAgc(msg.mode);
+        break;
+      case "setNotches":
+        this.state.notches = msg.notches.slice(0, 8);
+        this.syncNotches();
         break;
       case "setGain":
         this.state.gainMode = msg.mode;
@@ -194,6 +228,7 @@ export class Radio {
       case "setVfoOffset":
         this.state.vfoOffset = msg.hz;
         this.vfo.setFreq(-msg.hz); // bring the VFO down to DC
+        this.syncNotches();
         break;
       case "setAdsb":
         if (msg.on) this.enterAdsb();
@@ -286,14 +321,25 @@ export class Radio {
     this.vfo.setSampleRate(s.sampleRate);
     this.vfo.setFreq(-s.vfoOffset);
     this.reconfigureDemod();
+    this.demod.setNr(s.nrOn, s.nrLevel);
+    this.demod.setNb(s.nbOn, s.nbThreshold);
+    this.demod.setAgc(s.agc);
   }
 
   private reconfigureDemod() {
     this.demod.configure(
       this.state.mode as Mode,
       this.state.sampleRate,
-      this.state.bandwidth,
+      this.state.filterLow,
+      this.state.filterHigh,
     );
+    this.syncNotches();
+  }
+
+  /** Map absolute-RF notch frequencies to baseband offsets from the VFO. */
+  private syncNotches() {
+    const tuned = this.state.centerHz + this.state.vfoOffset;
+    this.demod.setNotchOffsets(this.state.notches.map((hz) => hz - tuned));
   }
 
   // --- IQ processing ---

@@ -84,6 +84,70 @@ export class ComplexDecimator {
   }
 }
 
+/**
+ * Narrow notch on an interleaved complex stream, used to null a single carrier
+ * or heterodyne at a chosen offset from DC. Works by shifting the target down to
+ * DC, removing it with a 1-pole complex high-pass, then shifting back — i.e. a
+ * band-stop a few tens of Hz wide centered on `offsetHz`. Operates in place.
+ */
+export class ComplexNotch {
+  private cos = 1;
+  private sin = 0;
+  private stepCos = 1;
+  private stepSin = 0;
+  private n = 0;
+  // high-pass (DC-removal) state, on the down-shifted I/Q
+  private lpI = 0;
+  private lpQ = 0;
+  private a: number;
+
+  constructor(offsetHz: number, sampleRate: number, widthHz = 60) {
+    this.setFreq(offsetHz, sampleRate);
+    // 1-pole corner ~ a*fs/(2π); pick `a` for the requested half-width.
+    this.a = Math.min(0.5, (2 * Math.PI * widthHz) / sampleRate);
+  }
+
+  setFreq(offsetHz: number, sampleRate: number) {
+    const w = (-2 * Math.PI * offsetHz) / sampleRate; // shift target -> DC
+    this.stepCos = Math.cos(w);
+    this.stepSin = Math.sin(w);
+  }
+
+  process(ch: Float32Array) {
+    let { cos, sin } = this;
+    const sc = this.stepCos;
+    const ss = this.stepSin;
+    const a = this.a;
+    for (let k = 0; k < ch.length; k += 2) {
+      const re = ch[k]!;
+      const im = ch[k + 1]!;
+      // shift down so the notch target lands at DC
+      const dI = re * cos - im * sin;
+      const dQ = re * sin + im * cos;
+      // complex high-pass: remove the (now-DC) target
+      this.lpI += a * (dI - this.lpI);
+      this.lpQ += a * (dQ - this.lpQ);
+      const hI = dI - this.lpI;
+      const hQ = dQ - this.lpQ;
+      // shift back up (conjugate rotation)
+      ch[k] = hI * cos + hQ * sin;
+      ch[k + 1] = -hI * sin + hQ * cos;
+      // advance oscillator
+      const nc = cos * sc - sin * ss;
+      const nsv = cos * ss + sin * sc;
+      cos = nc;
+      sin = nsv;
+      if ((this.n++ & 0x3ff) === 0) {
+        const mag = Math.hypot(cos, sin) || 1;
+        cos /= mag;
+        sin /= mag;
+      }
+    }
+    this.cos = cos;
+    this.sin = sin;
+  }
+}
+
 /** Streaming real FIR low-pass (no decimation), for audio shaping. */
 export class RealFir {
   private readonly T: number;

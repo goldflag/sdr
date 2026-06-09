@@ -126,6 +126,12 @@ export default function App() {
                   subscribeFft={radio.subscribeFft}
                   state={state}
                   onTune={(hz) => radio.send({ type: "setVfoOffset", hz })}
+                  onPassband={(low, high) =>
+                    radio.send({ type: "setPassband", low, high })
+                  }
+                  onNotches={(notches) =>
+                    radio.send({ type: "setNotches", notches })
+                  }
                 />
               </div>
             </>
