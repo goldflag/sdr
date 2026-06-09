@@ -5,6 +5,7 @@
 import {
   type ClientMessage,
   type DeviceInfo,
+  type MapLayer,
   type Mode,
   type RadioState,
   type ScanEntry,
@@ -45,6 +46,10 @@ const ADSB_BROADCAST_MS = 1000; // aircraft table refresh rate
 const AIS_BROADCAST_MS = 1000; // vessel table refresh rate
 const APRS_BROADCAST_MS = 1000; // station table refresh rate
 const ISM_BROADCAST_MS = 500; // ISM event log refresh rate
+// When several map layers are enabled, the dongle round-robins across them.
+const LAYER_DWELL_MS = 5000; // time spent on each band before rotating
+const LAYER_SETTLE_MS = 300; // ignore IQ right after a retune (tuner transient)
+const MAP_LAYERS: MapLayer[] = ["adsb", "ais", "aprs"];
 
 export interface RadioSinks {
   json: (msg: ServerMessage) => void;
@@ -89,6 +94,12 @@ export class Radio {
   private lastAprs = 0;
   private lastAprsCount = 0;
   private lastIsm = 0;
+  // Round-robin scheduler for the map decode layers.
+  private mapActive = false;
+  private mapTimer: ReturnType<typeof setInterval> | null = null;
+  private mapOrder: MapLayer[] = [];
+  private current: MapLayer | null = null;
+  private tuneAt = 0;
   // Receiver settings saved when entering a decode mode (ADS-B / AIS), restored
   // on exit.
   private preDecode: Pick<
@@ -274,19 +285,16 @@ export class Radio {
         this.syncNotches();
         break;
       case "setAdsb":
-        if (msg.on) this.enterAdsb();
-        else this.exitAdsb();
+        this.setLayer("adsb", msg.on);
         break;
       case "setAdsbRef":
         this.adsb.setRef(msg.lat, msg.lon);
         break;
       case "setAis":
-        if (msg.on) this.enterAis();
-        else this.exitAis();
+        this.setLayer("ais", msg.on);
         break;
       case "setAprs":
-        if (msg.on) this.enterAprs();
-        else this.exitAprs();
+        this.setLayer("aprs", msg.on);
         break;
       case "setIsm":
         if (msg.on) this.enterIsm();
@@ -352,89 +360,116 @@ export class Radio {
     }
   }
 
-  /** Retune to 1090 MHz @ 2 MSPS with max gain and start Mode S decoding. */
-  private enterAdsb() {
-    if (this.state.adsb) return;
-    this.exitDecoders(); // the dongle can only listen on one band at a time
-    this.scanner.stop();
-    this.saveDecodeState();
+  // --- map decode layers (ADS-B / AIS / APRS, time-multiplexed) -----------
+
+  /** Enable/disable a map layer, then reconcile the round-robin schedule. */
+  private setLayer(layer: MapLayer, on: boolean) {
+    if (this.state[layer] === on) return;
+    if (on) this.exitIsm(); // map layers and ISM both need the dongle
+    this.state[layer] = on;
+    if (on) this.resetLayer(layer); // clear stale targets from a prior session
+    this.reconcileLayers();
+  }
+
+  private resetLayer(layer: MapLayer) {
+    if (layer === "adsb") {
+      this.adsb.reset();
+      this.lastAdsb = 0;
+      this.lastAdsbCount = 0;
+    } else if (layer === "ais") {
+      this.ais.reset();
+      this.lastAis = 0;
+      this.lastAisCount = 0;
+    } else {
+      this.aprs.reset();
+      this.lastAprs = 0;
+      this.lastAprsCount = 0;
+    }
+  }
+
+  /** Centre/rate the dongle for one layer and mark it the active one. */
+  private tuneLayer(layer: MapLayer) {
     const s = this.state;
-    s.adsb = true;
-    s.centerHz = ADSB_FREQ_HZ;
-    s.sampleRate = ADSB_SAMPLE_RATE;
     s.directSampling = DIRECT_SAMPLING.OFF;
-    this.maxGain();
-    this.adsb.reset();
-    this.lastAdsb = 0;
-    this.lastAdsbCount = 0;
+    if (layer === "adsb") {
+      s.centerHz = ADSB_FREQ_HZ;
+      s.sampleRate = ADSB_SAMPLE_RATE;
+    } else if (layer === "ais") {
+      s.centerHz = AIS_FREQ_HZ;
+      s.sampleRate = AIS_SAMPLE_RATE;
+    } else {
+      // Tune below the channel so the FM carrier clears the centre DC spike.
+      s.centerHz = APRS_FREQ_HZ - APRS_IF_OFFSET;
+      s.sampleRate = APRS_SAMPLE_RATE;
+    }
+    this.current = layer;
+    s.activeLayer = layer;
+    this.tuneAt = Date.now();
     this.applyReceiver();
   }
 
-  /** Leave ADS-B and restore the previous receiver settings. */
-  private exitAdsb() {
-    if (!this.state.adsb) return;
-    this.state.adsb = false;
-    this.restoreDecodeState();
-    this.applyReceiver();
-  }
-
-  /** Retune to 162 MHz @ 240 kSPS with max gain and start AIS decoding. */
-  private enterAis() {
-    if (this.state.ais) return;
-    this.exitDecoders(); // mutually exclusive with the other decode modes
+  /** Start/stop/retime the dongle to cover exactly the enabled layers. */
+  private reconcileLayers() {
+    const enabled = MAP_LAYERS.filter((l) => this.state[l]);
+    if (this.mapTimer) {
+      clearInterval(this.mapTimer);
+      this.mapTimer = null;
+    }
+    if (enabled.length === 0) {
+      if (this.mapActive) {
+        this.mapActive = false;
+        this.current = null;
+        this.state.activeLayer = null;
+        this.restoreDecodeState();
+        this.applyReceiver();
+      }
+      return;
+    }
     this.scanner.stop();
-    this.saveDecodeState();
-    const s = this.state;
-    s.ais = true;
-    s.centerHz = AIS_FREQ_HZ;
-    s.sampleRate = AIS_SAMPLE_RATE;
-    s.directSampling = DIRECT_SAMPLING.OFF;
-    this.maxGain();
-    this.ais.reset();
-    this.lastAis = 0;
-    this.lastAisCount = 0;
-    this.applyReceiver();
+    if (!this.mapActive) {
+      this.mapActive = true;
+      this.saveDecodeState();
+      this.maxGain();
+    }
+    this.mapOrder = enabled;
+    // Keep dwelling on the current band if it's still enabled, else start over.
+    if (!this.current || !enabled.includes(this.current)) {
+      this.tuneLayer(enabled[0]!);
+    }
+    // Only round-robin when more than one band is enabled (else full duty).
+    if (enabled.length > 1) {
+      this.mapTimer = setInterval(() => this.rotateLayer(), LAYER_DWELL_MS);
+    }
   }
 
-  /** Leave AIS and restore the previous receiver settings. */
-  private exitAis() {
-    if (!this.state.ais) return;
-    this.state.ais = false;
-    this.restoreDecodeState();
-    this.applyReceiver();
+  private rotateLayer() {
+    if (!this.state.running) return; // don't thrash a stopped/disconnected tuner
+    const order = this.mapOrder;
+    if (order.length < 2) return;
+    const i = (order.indexOf(this.current as MapLayer) + 1) % order.length;
+    this.tuneLayer(order[i]!);
+    this.broadcastState();
   }
 
-  /** Retune to 144.39 MHz and start AFSK/AX.25 APRS decoding. */
-  private enterAprs() {
-    if (this.state.aprs) return;
-    this.exitDecoders();
-    this.scanner.stop();
-    this.saveDecodeState();
-    const s = this.state;
-    s.aprs = true;
-    // Tune below the channel so the FM carrier clears the centre DC spike.
-    s.centerHz = APRS_FREQ_HZ - APRS_IF_OFFSET;
-    s.sampleRate = APRS_SAMPLE_RATE;
-    s.directSampling = DIRECT_SAMPLING.OFF;
-    this.maxGain();
-    this.aprs.reset();
-    this.lastAprs = 0;
-    this.lastAprsCount = 0;
-    this.applyReceiver();
-  }
-
-  /** Leave APRS and restore the previous receiver settings. */
-  private exitAprs() {
-    if (!this.state.aprs) return;
-    this.state.aprs = false;
-    this.restoreDecodeState();
-    this.applyReceiver();
+  /** Force every map layer off (releasing the dongle), e.g. to enter ISM. */
+  private disableAllLayers() {
+    for (const l of MAP_LAYERS) this.state[l] = false;
+    if (this.mapTimer) {
+      clearInterval(this.mapTimer);
+      this.mapTimer = null;
+    }
+    if (this.mapActive) {
+      this.mapActive = false;
+      this.current = null;
+      this.state.activeLayer = null;
+      this.restoreDecodeState();
+    }
   }
 
   /** Retune to the selected ISM band @ 250 kSPS and start OOK decoding. */
   private enterIsm() {
     if (this.state.ism) return;
-    this.exitDecoders();
+    this.disableAllLayers(); // release the dongle from map mode
     this.scanner.stop();
     this.saveDecodeState();
     const s = this.state;
@@ -454,14 +489,6 @@ export class Radio {
     this.state.ism = false;
     this.restoreDecodeState();
     this.applyReceiver();
-  }
-
-  /** Leave whichever decode mode is active (they're mutually exclusive). */
-  private exitDecoders() {
-    this.exitAdsb();
-    this.exitAis();
-    this.exitAprs();
-    this.exitIsm();
   }
 
   /** Push center freq / sample rate / gain / direct sampling to the device. */
@@ -548,61 +575,59 @@ export class Radio {
   // --- IQ processing ---
 
   private onIq(iq: Float32Array) {
-    if (this.state.adsb) {
-      this.adsb.process(iq);
+    // Map layers: only the band the dongle is parked on right now decodes; the
+    // others keep their accumulated targets until their next dwell. Skip the
+    // first samples after a retune while the tuner settles.
+    if (this.current) {
       const now = Date.now();
-      if (now - this.lastAdsb >= ADSB_BROADCAST_MS) {
-        const total = this.adsb.totalMessages;
-        const rate = this.lastAdsb
-          ? (total - this.lastAdsbCount) / ((now - this.lastAdsb) / 1000)
-          : 0;
-        this.lastAdsb = now;
-        this.lastAdsbCount = total;
-        this.sinks.json({
-          type: "adsb",
-          aircraft: this.adsb.snapshot(now),
-          messageRate: Math.round(rate),
-        });
-      }
-      return;
-    }
-
-    if (this.state.ais) {
-      this.ais.process(iq);
-      const now = Date.now();
-      if (now - this.lastAis >= AIS_BROADCAST_MS) {
-        const total = this.ais.totalMessages;
-        const rate = this.lastAis
-          ? (total - this.lastAisCount) / ((now - this.lastAis) / 1000)
-          : 0;
-        this.lastAis = now;
-        this.lastAisCount = total;
-        this.sinks.json({
-          type: "ais",
-          vessels: this.ais.snapshot(now),
-          messageRate: Math.round(rate),
-          framesSeen: this.ais.candidateFrames,
-        });
-      }
-      return;
-    }
-
-    if (this.state.aprs) {
-      this.aprs.process(iq);
-      const now = Date.now();
-      if (now - this.lastAprs >= APRS_BROADCAST_MS) {
-        const total = this.aprs.totalMessages;
-        const rate = this.lastAprs
-          ? (total - this.lastAprsCount) / ((now - this.lastAprs) / 1000)
-          : 0;
-        this.lastAprs = now;
-        this.lastAprsCount = total;
-        this.sinks.json({
-          type: "aprs",
-          stations: this.aprs.snapshot(now),
-          messageRate: Math.round(rate),
-          framesSeen: this.aprs.candidateFrames,
-        });
+      if (now - this.tuneAt < LAYER_SETTLE_MS) return;
+      if (this.current === "adsb") {
+        this.adsb.process(iq);
+        if (now - this.lastAdsb >= ADSB_BROADCAST_MS) {
+          const total = this.adsb.totalMessages;
+          const rate = this.lastAdsb
+            ? (total - this.lastAdsbCount) / ((now - this.lastAdsb) / 1000)
+            : 0;
+          this.lastAdsb = now;
+          this.lastAdsbCount = total;
+          this.sinks.json({
+            type: "adsb",
+            aircraft: this.adsb.snapshot(now),
+            messageRate: Math.round(rate),
+          });
+        }
+      } else if (this.current === "ais") {
+        this.ais.process(iq);
+        if (now - this.lastAis >= AIS_BROADCAST_MS) {
+          const total = this.ais.totalMessages;
+          const rate = this.lastAis
+            ? (total - this.lastAisCount) / ((now - this.lastAis) / 1000)
+            : 0;
+          this.lastAis = now;
+          this.lastAisCount = total;
+          this.sinks.json({
+            type: "ais",
+            vessels: this.ais.snapshot(now),
+            messageRate: Math.round(rate),
+            framesSeen: this.ais.candidateFrames,
+          });
+        }
+      } else {
+        this.aprs.process(iq);
+        if (now - this.lastAprs >= APRS_BROADCAST_MS) {
+          const total = this.aprs.totalMessages;
+          const rate = this.lastAprs
+            ? (total - this.lastAprsCount) / ((now - this.lastAprs) / 1000)
+            : 0;
+          this.lastAprs = now;
+          this.lastAprsCount = total;
+          this.sinks.json({
+            type: "aprs",
+            stations: this.aprs.snapshot(now),
+            messageRate: Math.round(rate),
+            framesSeen: this.aprs.candidateFrames,
+          });
+        }
       }
       return;
     }

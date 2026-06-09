@@ -292,6 +292,13 @@ export interface VesselReport {
   seen: number; // seconds since last message
 }
 
+/**
+ * Map decode layers. The single dongle can only tune one band at a time, so when
+ * several are enabled the receiver round-robins across them; the map shows every
+ * enabled layer's accumulated targets together.
+ */
+export type MapLayer = "adsb" | "ais" | "aprs";
+
 /** One APRS station/object decoded from an AX.25 UI frame. */
 export interface StationReport {
   /** Source callsign with SSID, e.g. "N0CALL-9". */
@@ -372,12 +379,14 @@ export interface RadioState {
   agc: AgcMode;
   /** Manual notch filters, absolute RF frequencies in Hz. */
   notches: number[];
-  /** When true the radio is decoding ADS-B (1090 MHz) instead of audio. */
+  /** ADS-B (1090 MHz) map layer enabled. */
   adsb: boolean;
-  /** When true the radio is decoding AIS (162 MHz) instead of audio. */
+  /** AIS (162 MHz) map layer enabled. */
   ais: boolean;
-  /** When true the radio is decoding APRS (144.39 MHz) instead of audio. */
+  /** APRS (144.39 MHz) map layer enabled. */
   aprs: boolean;
+  /** Which enabled layer the dongle is sampling right now (round-robin), or null. */
+  activeLayer: MapLayer | null;
   /** When true the radio is decoding ISM-band OOK (rtl_433-style). */
   ism: boolean;
   /** Selected ISM centre frequency in Hz. */
@@ -561,6 +570,7 @@ export const DEFAULT_STATE: RadioState = {
   adsb: false,
   ais: false,
   aprs: false,
+  activeLayer: null,
   ism: false,
   ismFreqHz: ISM_FREQ_HZ,
 };

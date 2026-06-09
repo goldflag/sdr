@@ -18,6 +18,8 @@ interface Props {
   refLat: number | null;
   refLon: number | null;
   onSetRef: (lat: number | null, lon: number | null) => void;
+  /** Hide the receiver-location section (when shown once by a parent). */
+  hideRef?: boolean;
 }
 
 export function AdsbPanel(p: Props) {
@@ -57,14 +59,16 @@ export function AdsbPanel(p: Props) {
         )}
       </Section>
 
-      <Section title="Receiver location" defaultOpen={!hasRef}>
-        <RefControls
-          refLat={refLat}
-          refLon={refLon}
-          onSetRef={p.onSetRef}
-          hasRef={hasRef}
-        />
-      </Section>
+      {!p.hideRef && (
+        <Section title="Receiver location" defaultOpen={!hasRef}>
+          <RefControls
+            refLat={refLat}
+            refLon={refLon}
+            onSetRef={p.onSetRef}
+            hasRef={hasRef}
+          />
+        </Section>
+      )}
 
       {withDist.length > 0 && (
         <div className="scroll-thin overflow-x-auto">

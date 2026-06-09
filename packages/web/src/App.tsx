@@ -9,9 +9,10 @@ import { Bookmarks } from "@/components/Bookmarks";
 import { Scanner } from "@/components/Scanner";
 import { useBookmarks } from "@/lib/bookmarks";
 import { Vfo } from "@/components/Vfo";
-import { AdsbPanel } from "@/components/AdsbPanel";
+import { AdsbPanel, RefControls } from "@/components/AdsbPanel";
 import { AisPanel } from "@/components/AisPanel";
 import { AprsPanel } from "@/components/AprsPanel";
+import { Section } from "@/components/Controls";
 import { IsmPanel } from "@/components/IsmPanel";
 import { IsmConsole } from "@/components/IsmConsole";
 import {
@@ -46,8 +47,8 @@ const AdsbMap = lazy(() =>
 );
 
 type View = "spectrum" | "track" | "ism";
-/** Which decoder feeds the tracking map (the dongle does one band at a time). */
-type TrackSource = "adsb" | "ais" | "aprs";
+type MapLayer = "adsb" | "ais" | "aprs";
+type Layers = Record<MapLayer, boolean>;
 
 export default function App() {
   const radio = useRadio();
@@ -57,7 +58,7 @@ export default function App() {
   const [volume, setVolume] = useState(0.7);
   const [muted, setMuted] = useState(false);
   const [view, setView] = useState<View>("spectrum");
-  const [source, setSource] = useState<TrackSource>("adsb");
+  const [layers, setLayers] = useState<Layers>(loadLayers);
   const [selected, setSelected] = useState<string | null>(null);
   const [ref, setRef] = useState<{ lat: number; lon: number } | null>(loadRef);
   const [display, setDisplay] = useState<DisplaySettings>(loadDisplay);
@@ -70,35 +71,48 @@ export default function App() {
     saveDisplay(next);
   };
 
-  // Activate the decoder for a source (the server auto-disables the others).
-  const activate = (s: TrackSource) => {
-    if (s === "adsb") radio.send({ type: "setAdsb", on: true });
-    else if (s === "ais") radio.send({ type: "setAis", on: true });
-    else radio.send({ type: "setAprs", on: true });
+  const sendLayer = (l: MapLayer, on: boolean) => {
+    if (l === "adsb") radio.send({ type: "setAdsb", on });
+    else if (l === "ais") radio.send({ type: "setAis", on });
+    else radio.send({ type: "setAprs", on });
+  };
+
+  // Push every layer's enabled state to the server (it round-robins the dongle
+  // across the enabled bands and shows them together on the map).
+  const activateLayers = (ls: Layers) => {
+    sendLayer("adsb", ls.adsb);
+    sendLayer("ais", ls.ais);
+    sendLayer("aprs", ls.aprs);
+  };
+
+  const allLayersOff = () => {
+    sendLayer("adsb", false);
+    sendLayer("ais", false);
+    sendLayer("aprs", false);
   };
 
   const switchView = (v: View) => {
     setView(v);
     setSelected(null);
     if (v === "track") {
-      activate(source); // server auto-disables ISM / the other band
+      radio.send({ type: "setIsm", on: false });
+      activateLayers(layers);
     } else if (v === "ism") {
+      allLayersOff();
       radio.send({ type: "setIsm", on: true });
     } else {
       // Spectrum: leave every decode mode.
-      radio.send({ type: "setAdsb", on: false });
-      radio.send({ type: "setAis", on: false });
-      radio.send({ type: "setAprs", on: false });
+      allLayersOff();
       radio.send({ type: "setIsm", on: false });
     }
   };
 
-  // Switch which decoder feeds the map while staying in the tracking view.
-  const switchSource = (s: TrackSource) => {
-    if (s === source) return;
-    setSource(s);
-    setSelected(null);
-    activate(s);
+  // Toggle one map layer on/off (layers display together).
+  const toggleLayer = (l: MapLayer) => {
+    const next = { ...layers, [l]: !layers[l] };
+    setLayers(next);
+    saveLayers(next);
+    sendLayer(l, next[l]);
   };
 
   const setReceiverRef = (lat: number | null, lon: number | null) => {
@@ -157,38 +171,68 @@ export default function App() {
       <div className="flex min-h-0 flex-1">
         {/* Control rail — receiver controls, or traffic when in the map view */}
         <aside className="scroll-thin w-[320px] shrink-0 overflow-y-auto border-r bg-sidebar">
-          {view === "track" && source === "adsb" ? (
-            <AdsbPanel
-              aircraft={radio.aircraft}
-              messageRate={radio.messageRate}
-              selected={selected}
-              onSelect={setSelected}
-              refLat={ref?.lat ?? null}
-              refLon={ref?.lon ?? null}
-              onSetRef={setReceiverRef}
-            />
-          ) : view === "track" && source === "ais" ? (
-            <AisPanel
-              vessels={radio.vessels}
-              messageRate={radio.aisMessageRate}
-              framesSeen={radio.aisFramesSeen}
-              selected={selected}
-              onSelect={setSelected}
-              refLat={ref?.lat ?? null}
-              refLon={ref?.lon ?? null}
-              onSetRef={setReceiverRef}
-            />
-          ) : view === "track" && source === "aprs" ? (
-            <AprsPanel
-              stations={radio.stations}
-              messageRate={radio.aprsMessageRate}
-              framesSeen={radio.aprsFramesSeen}
-              selected={selected}
-              onSelect={setSelected}
-              refLat={ref?.lat ?? null}
-              refLon={ref?.lon ?? null}
-              onSetRef={setReceiverRef}
-            />
+          {view === "track" ? (
+            <>
+              <div className="border-b p-2">
+                <LayerToggle
+                  layers={layers}
+                  activeLayer={state.activeLayer}
+                  onToggle={toggleLayer}
+                />
+              </div>
+              <Section title="Receiver location" defaultOpen={!ref}>
+                <RefControls
+                  refLat={ref?.lat ?? null}
+                  refLon={ref?.lon ?? null}
+                  onSetRef={setReceiverRef}
+                  hasRef={ref != null}
+                />
+              </Section>
+              {!layers.adsb && !layers.ais && !layers.aprs && (
+                <p className="px-4 py-3 text-[11px] text-muted-foreground">
+                  No layers enabled. Turn on Aircraft, Ships or APRS above to
+                  start decoding.
+                </p>
+              )}
+              {layers.adsb && (
+                <AdsbPanel
+                  aircraft={radio.aircraft}
+                  messageRate={radio.messageRate}
+                  selected={selected}
+                  onSelect={setSelected}
+                  refLat={ref?.lat ?? null}
+                  refLon={ref?.lon ?? null}
+                  onSetRef={setReceiverRef}
+                  hideRef
+                />
+              )}
+              {layers.ais && (
+                <AisPanel
+                  vessels={radio.vessels}
+                  messageRate={radio.aisMessageRate}
+                  framesSeen={radio.aisFramesSeen}
+                  selected={selected}
+                  onSelect={setSelected}
+                  refLat={ref?.lat ?? null}
+                  refLon={ref?.lon ?? null}
+                  onSetRef={setReceiverRef}
+                  hideRef
+                />
+              )}
+              {layers.aprs && (
+                <AprsPanel
+                  stations={radio.stations}
+                  messageRate={radio.aprsMessageRate}
+                  framesSeen={radio.aprsFramesSeen}
+                  selected={selected}
+                  onSelect={setSelected}
+                  refLat={ref?.lat ?? null}
+                  refLon={ref?.lon ?? null}
+                  onSetRef={setReceiverRef}
+                  hideRef
+                />
+              )}
+            </>
           ) : view === "ism" ? (
             <IsmPanel
               stats={radio.ismStats}
@@ -221,16 +265,23 @@ export default function App() {
           <div className="flex items-center gap-3 border-b px-4 py-2">
             <ViewTabs view={view} onChange={switchView} />
             {view === "track" && (
-              <>
-                <SourceToggle source={source} onChange={switchSource} />
-                <span className="font-mono text-[11px] text-muted-foreground">
-                  {source === "adsb"
-                    ? `${radio.aircraft.length} aircraft · ${radio.messageRate} msg/s`
-                    : source === "ais"
-                      ? `${radio.vessels.length} vessels · ${radio.aisMessageRate} msg/s`
-                      : `${radio.stations.length} stations · ${radio.aprsMessageRate} msg/s`}
+              <span className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+                <span>
+                  {[
+                    layers.adsb && `${radio.aircraft.length} aircraft`,
+                    layers.ais && `${radio.vessels.length} ships`,
+                    layers.aprs && `${radio.stations.length} stations`,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ") || "no layers enabled"}
                 </span>
-              </>
+                {state.activeLayer && (
+                  <span className="flex items-center gap-1 text-primary/80">
+                    <span className="size-1.5 animate-pulse rounded-full bg-primary" />
+                    {LAYER_LABEL[state.activeLayer]}
+                  </span>
+                )}
+              </span>
             )}
             {view === "ism" && (
               <span className="font-mono text-[11px] text-muted-foreground">
@@ -279,10 +330,9 @@ export default function App() {
                 }
               >
                 <AdsbMap
-                  key={source}
-                  aircraft={source === "adsb" ? radio.aircraft : []}
-                  vessels={source === "ais" ? radio.vessels : []}
-                  stations={source === "aprs" ? radio.stations : []}
+                  aircraft={layers.adsb ? radio.aircraft : []}
+                  vessels={layers.ais ? radio.vessels : []}
+                  stations={layers.aprs ? radio.stations : []}
                   selected={selected}
                   onSelect={setSelected}
                   refLat={ref?.lat ?? null}
@@ -305,11 +355,17 @@ export default function App() {
         state={state}
         audioRunning={audioRunning}
         view={view}
-        source={source}
+        layers={layers}
       />
     </div>
   );
 }
+
+const LAYER_LABEL: Record<MapLayer, string> = {
+  adsb: "ADS-B",
+  ais: "AIS",
+  aprs: "APRS",
+};
 
 const REF_KEY = "sdr.adsb.ref";
 
@@ -328,6 +384,27 @@ function saveRef(r: { lat: number; lon: number } | null) {
   try {
     if (r) localStorage.setItem(REF_KEY, JSON.stringify(r));
     else localStorage.removeItem(REF_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+const LAYERS_KEY = "sdr.map.layers";
+const DEFAULT_LAYERS: Layers = { adsb: true, ais: false, aprs: false };
+
+function loadLayers(): Layers {
+  try {
+    const v = localStorage.getItem(LAYERS_KEY);
+    if (v) return { ...DEFAULT_LAYERS, ...JSON.parse(v) };
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_LAYERS;
+}
+
+function saveLayers(l: Layers) {
+  try {
+    localStorage.setItem(LAYERS_KEY, JSON.stringify(l));
   } catch {
     /* storage unavailable */
   }
@@ -390,15 +467,21 @@ function ViewTabs({
   );
 }
 
-/** Picks which decoder (aircraft / ships) drives the tracking map. */
-function SourceToggle({
-  source,
-  onChange,
+/**
+ * Multi-select map layers. Each is independently on/off; the server round-robins
+ * the dongle across the enabled bands and the map shows them together. A pulsing
+ * dot marks the band being sampled right now.
+ */
+function LayerToggle({
+  layers,
+  activeLayer,
+  onToggle,
 }: {
-  source: TrackSource;
-  onChange: (s: TrackSource) => void;
+  layers: Layers;
+  activeLayer: MapLayer | null;
+  onToggle: (l: MapLayer) => void;
 }) {
-  const opts: { id: TrackSource; label: string; icon: typeof Plane }[] = [
+  const opts: { id: MapLayer; label: string; icon: typeof Plane }[] = [
     { id: "adsb", label: "Aircraft", icon: Plane },
     { id: "ais", label: "Ships", icon: Ship },
     { id: "aprs", label: "APRS", icon: RadioTower },
@@ -407,18 +490,24 @@ function SourceToggle({
     <div className="flex items-center gap-0.5 rounded-md border bg-muted/30 p-0.5">
       {opts.map((o) => {
         const Icon = o.icon;
-        const active = source === o.id;
+        const on = layers[o.id];
+        const live = activeLayer === o.id;
         return (
           <button
             key={o.id}
             type="button"
-            onClick={() => onChange(o.id)}
-            className={`flex items-center gap-1.5 rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
-              active
+            onClick={() => onToggle(o.id)}
+            aria-pressed={on}
+            title={`${o.label} layer ${on ? "on" : "off"}`}
+            className={`relative flex flex-1 items-center justify-center gap-1.5 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+              on
                 ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
+                : "text-muted-foreground/70 hover:text-foreground"
             }`}
           >
+            {live && (
+              <span className="absolute right-1 top-1 size-1.5 animate-pulse rounded-full bg-primary" />
+            )}
             <Icon className="size-3" />
             {o.label}
           </button>
@@ -498,38 +587,41 @@ function StatusBar({
   state,
   audioRunning,
   view,
-  source,
+  layers,
 }: {
   state: RadioState;
   audioRunning: boolean;
   view: View;
-  source: TrackSource;
+  layers: Layers;
 }) {
-  const isAdsb = view === "track" && source === "adsb";
-  const isAis = view === "track" && source === "ais";
-  const isAprs = view === "track" && source === "aprs";
+  const isTrack = view === "track";
   const isIsm = view === "ism";
+  const enabledCount = Number(layers.adsb) + Number(layers.ais) + Number(layers.aprs);
+  const liveFreqM =
+    state.activeLayer === "adsb"
+      ? "1090.000"
+      : state.activeLayer === "ais"
+        ? "162.000"
+        : state.activeLayer === "aprs"
+          ? "144.390"
+          : null;
   return (
     <footer className="flex items-center justify-between gap-4 border-t bg-sidebar px-5 py-1.5 font-mono text-[11px] text-muted-foreground">
       <span className="flex items-center gap-1.5">
         <Activity className="size-3 text-primary" />
-        {isAdsb
-          ? "Decoding Mode S extended squitter at 1090 MHz · markers update live"
-          : isAis
-            ? "Decoding AIS GMSK on both channels at 162 MHz · markers update live"
-            : isAprs
-              ? "Decoding AX.25 AFSK packets at 144.390 MHz · markers update live"
-              : isIsm
-                ? "Decoding ISM-band OOK · rtl_433-style pulse analysis"
-                : "Click to tune · scroll to zoom · drag filter edges · ⌥-click to notch"}
+        {isTrack
+          ? enabledCount > 1
+            ? `Time-sharing the dongle across ${enabledCount} bands · markers update as each is sampled`
+            : enabledCount === 1
+              ? "Decoding one band · markers update live"
+              : "No layers enabled — pick Aircraft / Ships / APRS"
+          : isIsm
+            ? "Decoding ISM-band OOK · rtl_433-style pulse analysis"
+            : "Click to tune · scroll to zoom · drag filter edges · ⌥-click to notch"}
       </span>
       <div className="flex items-center gap-4">
-        {isAdsb ? (
-          <Stat label="FREQ" value="1090.000M" />
-        ) : isAis ? (
-          <Stat label="FREQ" value="162.000M" />
-        ) : isAprs ? (
-          <Stat label="FREQ" value="144.390M" />
+        {isTrack ? (
+          <Stat label="FREQ" value={liveFreqM ? `${liveFreqM}M` : "—"} />
         ) : isIsm ? (
           <Stat label="FREQ" value={`${(state.ismFreqHz / 1e6).toFixed(3)}M`} />
         ) : (

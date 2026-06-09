@@ -18,6 +18,7 @@ interface Props {
   refLat: number | null;
   refLon: number | null;
   onSetRef: (lat: number | null, lon: number | null) => void;
+  hideRef?: boolean;
 }
 
 export function AprsPanel(p: Props) {
@@ -63,14 +64,16 @@ export function AprsPanel(p: Props) {
         )}
       </Section>
 
-      <Section title="Receiver location" defaultOpen={!hasRef}>
-        <RefControls
-          refLat={refLat}
-          refLon={refLon}
-          onSetRef={p.onSetRef}
-          hasRef={hasRef}
-        />
-      </Section>
+      {!p.hideRef && (
+        <Section title="Receiver location" defaultOpen={!hasRef}>
+          <RefControls
+            refLat={refLat}
+            refLon={refLon}
+            onSetRef={p.onSetRef}
+            hasRef={hasRef}
+          />
+        </Section>
+      )}
 
       {withDist.length > 0 && (
         <div className="scroll-thin overflow-x-auto">
