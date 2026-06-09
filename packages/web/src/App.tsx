@@ -15,6 +15,8 @@ import { AprsPanel } from "@/components/AprsPanel";
 import { Section } from "@/components/Controls";
 import { IsmPanel } from "@/components/IsmPanel";
 import { IsmConsole } from "@/components/IsmConsole";
+import { AptPanel } from "@/components/AptPanel";
+import { AptView } from "@/components/AptView";
 import {
   SpectrumDisplay,
   DEFAULT_DISPLAY,
@@ -35,6 +37,7 @@ import {
   Plane,
   RadioReceiver,
   RadioTower,
+  Satellite,
   Ship,
   Volume1,
   Volume2,
@@ -46,7 +49,7 @@ const AdsbMap = lazy(() =>
   import("@/components/AdsbMap").then((m) => ({ default: m.AdsbMap })),
 );
 
-type View = "spectrum" | "track" | "ism";
+type View = "spectrum" | "track" | "ism" | "apt";
 type MapLayer = "adsb" | "ais" | "aprs";
 type Layers = Record<MapLayer, boolean>;
 
@@ -96,14 +99,21 @@ export default function App() {
     setSelected(null);
     if (v === "track") {
       radio.send({ type: "setIsm", on: false });
+      radio.send({ type: "setApt", on: false });
       activateLayers(layers);
     } else if (v === "ism") {
       allLayersOff();
+      radio.send({ type: "setApt", on: false });
       radio.send({ type: "setIsm", on: true });
+    } else if (v === "apt") {
+      allLayersOff();
+      radio.send({ type: "setIsm", on: false });
+      radio.send({ type: "setApt", on: true });
     } else {
       // Spectrum: leave every decode mode.
       allLayersOff();
       radio.send({ type: "setIsm", on: false });
+      radio.send({ type: "setApt", on: false });
     }
   };
 
@@ -239,6 +249,12 @@ export default function App() {
               ismFreqHz={state.ismFreqHz}
               send={radio.send}
             />
+          ) : view === "apt" ? (
+            <AptPanel
+              stats={radio.aptStats}
+              aptFreqHz={state.aptFreqHz}
+              send={radio.send}
+            />
           ) : (
             <>
               <Presets state={state} send={radio.send} />
@@ -287,6 +303,17 @@ export default function App() {
               <span className="font-mono text-[11px] text-muted-foreground">
                 {radio.ismStats?.decoded ?? 0} decoded ·{" "}
                 {radio.ismStats?.bursts ?? 0} bursts
+              </span>
+            )}
+            {view === "apt" && (
+              <span className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+                <span>{radio.aptStats?.lines ?? 0} lines</span>
+                {(radio.aptStats?.sync ?? 0) > 0.45 && (
+                  <span className="flex items-center gap-1 text-primary/80">
+                    <span className="size-1.5 animate-pulse rounded-full bg-primary" />
+                    sync {Math.round((radio.aptStats?.sync ?? 0) * 100)}%
+                  </span>
+                )}
               </span>
             )}
             {view === "spectrum" && (
@@ -339,6 +366,10 @@ export default function App() {
                   refLon={ref?.lon ?? null}
                 />
               </Suspense>
+            </div>
+          ) : view === "apt" ? (
+            <div className="min-h-0 flex-1">
+              <AptView subscribeApt={radio.subscribeApt} stats={radio.aptStats} />
             </div>
           ) : (
             <div className="min-h-0 flex-1">
@@ -441,6 +472,7 @@ function ViewTabs({
     { id: "spectrum", label: "Spectrum", icon: AudioWaveform },
     { id: "track", label: "Map", icon: MapIcon },
     { id: "ism", label: "ISM 433", icon: RadioReceiver },
+    { id: "apt", label: "Weather", icon: Satellite },
   ];
   return (
     <div className="flex items-center gap-0.5 rounded-md bg-muted/50 p-0.5">
@@ -596,6 +628,7 @@ function StatusBar({
 }) {
   const isTrack = view === "track";
   const isIsm = view === "ism";
+  const isApt = view === "apt";
   const enabledCount = Number(layers.adsb) + Number(layers.ais) + Number(layers.aprs);
   const liveFreqM =
     state.activeLayer === "adsb"
@@ -617,13 +650,17 @@ function StatusBar({
               : "No layers enabled — pick Aircraft / Ships / APRS"
           : isIsm
             ? "Decoding ISM-band OOK · rtl_433-style pulse analysis"
-            : "Click to tune · scroll to zoom · drag filter edges · ⌥-click to notch"}
+            : isApt
+              ? "Decoding NOAA APT · 2400 Hz subcarrier image, 2 lines/sec"
+              : "Click to tune · scroll to zoom · drag filter edges · ⌥-click to notch"}
       </span>
       <div className="flex items-center gap-4">
         {isTrack ? (
           <Stat label="FREQ" value={liveFreqM ? `${liveFreqM}M` : "—"} />
         ) : isIsm ? (
           <Stat label="FREQ" value={`${(state.ismFreqHz / 1e6).toFixed(3)}M`} />
+        ) : isApt ? (
+          <Stat label="FREQ" value={`${(state.aptFreqHz / 1e6).toFixed(4)}M`} />
         ) : (
           <>
             <Stat label="MODE" value={state.mode} />

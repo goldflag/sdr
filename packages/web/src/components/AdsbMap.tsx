@@ -4,7 +4,7 @@
 // marker + range rings, a click-to-select detail popup, and table<->map
 // selection linking.
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   AircraftReport,
   StationReport,
@@ -14,14 +14,16 @@ import OLMap from "ol/Map";
 import View from "ol/View";
 import TileLayer from "ol/layer/Tile";
 import OSM from "ol/source/OSM";
+import XYZ from "ol/source/XYZ";
 import VectorLayer from "ol/layer/Vector";
 import VectorSource from "ol/source/Vector";
 import Feature from "ol/Feature";
 import Overlay from "ol/Overlay";
 import Point from "ol/geom/Point";
 import LineString from "ol/geom/LineString";
-import { circular } from "ol/geom/Polygon";
-import { fromLonLat } from "ol/proj";
+import Polygon, { circular } from "ol/geom/Polygon";
+import { createEmpty, extend, isEmpty } from "ol/extent";
+import { fromLonLat, toLonLat } from "ol/proj";
 import {
   Icon,
   Style,
@@ -30,6 +32,24 @@ import {
   Stroke,
   Circle as CircleStyle,
 } from "ol/style";
+import {
+  Crosshair,
+  LocateFixed,
+  Maximize2,
+  Minus,
+  Plus,
+  Settings2,
+} from "lucide-react";
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { categoryInfo, icaoInfo, type AircraftKind } from "@/lib/icao";
 import {
   aprsKind,
@@ -53,6 +73,124 @@ interface Props {
 
 const MAX_TRAIL = 60; // points kept per aircraft trail
 const STALE_S = 60;
+const COVERAGE_BUCKETS = 72; // 5-degree max-range bins
+
+type BasemapId = "dark" | "light" | "satellite" | "terrain" | "minimal";
+type LabelMode = "none" | "selected" | "id" | "idAlt" | "idSpeed";
+
+interface MapSettings {
+  basemap: BasemapId;
+  labelMode: LabelMode;
+  trails: boolean;
+  rangeRings: boolean;
+  receiver: boolean;
+  coverage: boolean;
+  legend: boolean;
+  readouts: boolean;
+  ageFade: boolean;
+}
+
+const BASEMAPS: {
+  id: BasemapId;
+  label: string;
+  className?: string;
+  source: () => OSM | XYZ;
+}[] = [
+  {
+    id: "dark",
+    label: "Dark OSM",
+    className: "ol-basemap-dark",
+    source: () => new OSM(),
+  },
+  { id: "light", label: "Light OSM", source: () => new OSM() },
+  {
+    id: "satellite",
+    label: "Satellite",
+    source: () =>
+      new XYZ({
+        url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attributions: "Tiles © Esri",
+        maxZoom: 19,
+      }),
+  },
+  {
+    id: "terrain",
+    label: "Terrain",
+    source: () =>
+      new XYZ({
+        url: "https://{a-c}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        attributions: "Map data © OpenStreetMap contributors, SRTM | OpenTopoMap",
+        maxZoom: 17,
+      }),
+  },
+  {
+    id: "minimal",
+    label: "Minimal",
+    className: "ol-basemap-minimal",
+    source: () =>
+      new XYZ({
+        url: "https://{a-d}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}.png",
+        attributions: "© OpenStreetMap contributors © CARTO",
+        maxZoom: 20,
+      }),
+  },
+];
+
+const LABEL_MODES: { id: LabelMode; label: string }[] = [
+  { id: "idAlt", label: "ID + altitude" },
+  { id: "id", label: "ID only" },
+  { id: "idSpeed", label: "ID + speed" },
+  { id: "selected", label: "Selected only" },
+  { id: "none", label: "None" },
+];
+
+const DEFAULT_MAP_SETTINGS: MapSettings = {
+  basemap: "dark",
+  labelMode: "idAlt",
+  trails: true,
+  rangeRings: true,
+  receiver: true,
+  coverage: true,
+  legend: true,
+  readouts: true,
+  ageFade: true,
+};
+
+const MAP_SETTINGS_KEY = "sdr.map.settings";
+
+function loadMapSettings(): MapSettings {
+  try {
+    const raw = localStorage.getItem(MAP_SETTINGS_KEY);
+    if (!raw) return DEFAULT_MAP_SETTINGS;
+    const v = JSON.parse(raw);
+    return {
+      ...DEFAULT_MAP_SETTINGS,
+      ...v,
+      basemap: isBasemap(v?.basemap) ? v.basemap : DEFAULT_MAP_SETTINGS.basemap,
+      labelMode: isLabelMode(v?.labelMode)
+        ? v.labelMode
+        : DEFAULT_MAP_SETTINGS.labelMode,
+    };
+  } catch {
+    return DEFAULT_MAP_SETTINGS;
+  }
+}
+
+function saveMapSettings(settings: MapSettings) {
+  try {
+    localStorage.setItem(MAP_SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+function isBasemap(v: unknown): v is BasemapId {
+  return BASEMAPS.some((b) => b.id === v);
+}
+
+function isLabelMode(v: unknown): v is LabelMode {
+  return LABEL_MODES.some((m) => m.id === v);
+}
 
 // --- marker icons ----------------------------------------------------------
 
@@ -122,11 +260,6 @@ function vesselColor(sog?: number): string {
   if (sog < 7) return "#2dd4bf"; // typical transit
   if (sog < 15) return "#38bdf8";
   return "#a78bfa"; // fast craft
-}
-
-function vesselLabel(v: VesselReport): string {
-  const id = v.name?.trim() || v.mmsi;
-  return v.sog != null && v.sog >= 0.5 ? `${id}\n${v.sog.toFixed(1)} kt` : id;
 }
 
 // APRS station markers: a small glyph per symbol kind. Vehicles/aircraft point
@@ -205,12 +338,6 @@ function aprsIcon(
   });
 }
 
-function stationLabel(s: StationReport): string {
-  return s.speed != null && s.speed >= 1
-    ? `${s.call}\n${s.speed.toFixed(0)} kt`
-    : s.call;
-}
-
 function altColor(alt?: number): string {
   if (alt == null) return "#9ca3af";
   const t = Math.min(1, Math.max(0, alt / 40000));
@@ -224,11 +351,115 @@ function altColor(alt?: number): string {
   return "#f87171";
 }
 
-function label(a: AircraftReport): string {
-  const id =
-    a.callsign?.trim() || icaoInfo(a.icao).registration || a.icao.toUpperCase();
-  const alt = a.altitude != null ? `${Math.round(a.altitude / 100) * 100}ft` : "";
-  return alt ? `${id}\n${alt}` : id;
+function targetBaseId(a: AircraftReport): string {
+  return (
+    a.callsign?.trim() || icaoInfo(a.icao).registration || a.icao.toUpperCase()
+  );
+}
+
+function aircraftLabel(
+  a: AircraftReport,
+  mode: LabelMode,
+  selected: boolean,
+  zoom: number,
+): string {
+  if (!shouldShowLabel(mode, selected, zoom)) return "";
+  const id = targetBaseId(a);
+  if (mode === "idSpeed" && a.speed != null) return `${id}\n${a.speed} kt`;
+  if (mode === "idAlt" && a.altitude != null) {
+    return `${id}\n${Math.round(a.altitude / 100) * 100} ft`;
+  }
+  return id;
+}
+
+function vesselMapLabel(
+  v: VesselReport,
+  mode: LabelMode,
+  selected: boolean,
+  zoom: number,
+): string {
+  if (!shouldShowLabel(mode, selected, zoom)) return "";
+  const id = v.name?.trim() || v.mmsi;
+  if (mode === "idSpeed" && v.sog != null) return `${id}\n${v.sog.toFixed(1)} kt`;
+  return id;
+}
+
+function stationMapLabel(
+  s: StationReport,
+  mode: LabelMode,
+  selected: boolean,
+  zoom: number,
+): string {
+  if (!shouldShowLabel(mode, selected, zoom)) return "";
+  if (mode === "idAlt" && s.altitude != null) {
+    return `${s.call}\n${s.altitude.toLocaleString()} ft`;
+  }
+  if (mode === "idSpeed" && s.speed != null) return `${s.call}\n${s.speed} kt`;
+  return s.call;
+}
+
+function shouldShowLabel(mode: LabelMode, selected: boolean, zoom: number): boolean {
+  if (mode === "none") return false;
+  if (mode === "selected") return selected;
+  if (selected) return true;
+  return zoom >= 6.4;
+}
+
+function opacityForAge(seen: number, floor: number, ageFade: boolean): number {
+  return ageFade ? Math.max(floor, 1 - seen / STALE_S) : 1;
+}
+
+function destinationPoint(
+  lat: number,
+  lon: number,
+  bearingDeg: number,
+  distanceNmValue: number,
+): [number, number] {
+  const radiusNm = 3440.065;
+  const angular = distanceNmValue / radiusNm;
+  const brg = (bearingDeg * Math.PI) / 180;
+  const lat1 = (lat * Math.PI) / 180;
+  const lon1 = (lon * Math.PI) / 180;
+  const lat2 = Math.asin(
+    Math.sin(lat1) * Math.cos(angular) +
+      Math.cos(lat1) * Math.sin(angular) * Math.cos(brg),
+  );
+  const lon2 =
+    lon1 +
+    Math.atan2(
+      Math.sin(brg) * Math.sin(angular) * Math.cos(lat1),
+      Math.cos(angular) - Math.sin(lat1) * Math.sin(lat2),
+    );
+  return [
+    (((lon2 * 180) / Math.PI + 540) % 360) - 180,
+    (lat2 * 180) / Math.PI,
+  ];
+}
+
+function coverageFeature(
+  bins: number[],
+  refLat: number,
+  refLon: number,
+): Feature<Polygon> | null {
+  const nonZero = bins.filter((v) => v > 0).length;
+  if (nonZero < 3) return null;
+  const coords: number[][] = [];
+  for (let i = 0; i < bins.length; i++) {
+    const nm = bins[i] ?? 0;
+    const bearingDeg = (i / bins.length) * 360;
+    const lonLat =
+      nm > 0 ? destinationPoint(refLat, refLon, bearingDeg, nm) : [refLon, refLat];
+    coords.push(fromLonLat(lonLat));
+  }
+  coords.push(coords[0]!);
+  const f = new Feature(new Polygon([coords]));
+  f.setStyle(
+    new Style({
+      fill: new Fill({ color: "rgba(96,165,250,0.12)" }),
+      stroke: new Stroke({ color: "rgba(125,180,235,0.55)", width: 1.5 }),
+    }),
+  );
+  return f;
 }
 
 export function AdsbMap({
@@ -240,16 +471,22 @@ export function AdsbMap({
   refLat,
   refLon,
 }: Props) {
+  const rootRef = useRef<HTMLDivElement>(null);
   const elRef = useRef<HTMLDivElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<OLMap | null>(null);
+  const basemapLayers = useRef(new Map<BasemapId, TileLayer>());
   const planeSrc = useRef<VectorSource | null>(null);
   const trailSrc = useRef<VectorSource | null>(null);
   const rangeSrc = useRef<VectorSource | null>(null);
+  const coverageSrc = useRef<VectorSource | null>(null);
   const shipSrc = useRef<VectorSource | null>(null);
   const shipTrailSrc = useRef<VectorSource | null>(null);
   const stationSrc = useRef<VectorSource | null>(null);
   const stationTrailSrc = useRef<VectorSource | null>(null);
+  const trailLayer = useRef<VectorLayer<VectorSource> | null>(null);
+  const shipTrailLayer = useRef<VectorLayer<VectorSource> | null>(null);
+  const stationTrailLayer = useRef<VectorLayer<VectorSource> | null>(null);
   const overlayRef = useRef<Overlay | null>(null);
   const planeFeats = useRef(new Map<string, Feature>());
   const trailFeats = useRef(new Map<string, Feature>());
@@ -260,9 +497,35 @@ export function AdsbMap({
   const stationFeats = useRef(new Map<string, Feature>());
   const stationTrailFeats = useRef(new Map<string, Feature>());
   const stationTrails = useRef(new Map<string, number[][]>());
+  const coverageBins = useRef<number[]>(Array(COVERAGE_BUCKETS).fill(0));
+  const coverageRefKey = useRef<string | null>(null);
   const didFit = useRef(false);
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
+  const refPos = useRef<{ lat: number | null; lon: number | null }>({
+    lat: refLat,
+    lon: refLon,
+  });
+  refPos.current = { lat: refLat, lon: refLon };
+  const [settings, setSettings] = useState<MapSettings>(loadMapSettings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [followSelected, setFollowSelected] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [zoom, setZoom] = useState(4);
+  const [cursor, setCursor] = useState<{
+    lat: number;
+    lon: number;
+    dist: number | null;
+    brg: number | null;
+  } | null>(null);
+
+  const setMapSettings = (patch: Partial<MapSettings>) => {
+    setSettings((current) => {
+      const next = { ...current, ...patch };
+      saveMapSettings(next);
+      return next;
+    });
+  };
 
   const selectedAircraft = useMemo(
     () => aircraft.find((a) => a.icao === selected) ?? null,
@@ -283,6 +546,7 @@ export function AdsbMap({
     const planes = new VectorSource();
     const trailV = new VectorSource();
     const range = new VectorSource();
+    const coverage = new VectorSource();
     const ships = new VectorSource();
     const shipTrailV = new VectorSource();
     const stns = new VectorSource();
@@ -290,21 +554,46 @@ export function AdsbMap({
     planeSrc.current = planes;
     trailSrc.current = trailV;
     rangeSrc.current = range;
+    coverageSrc.current = coverage;
     shipSrc.current = ships;
     shipTrailSrc.current = shipTrailV;
     stationSrc.current = stns;
     stationTrailSrc.current = stnTrailV;
 
+    const baseLayers = BASEMAPS.map((b) => {
+      const layer = new TileLayer({
+        source: b.source(),
+        className: b.className,
+        visible: b.id === settings.basemap,
+      });
+      basemapLayers.current.set(b.id, layer);
+      return layer;
+    });
+    const trailVLayer = new VectorLayer({
+      source: trailV,
+      visible: settings.trails,
+    });
+    const shipTrailVLayer = new VectorLayer({
+      source: shipTrailV,
+      visible: settings.trails,
+    });
+    const stnTrailVLayer = new VectorLayer({
+      source: stnTrailV,
+      visible: settings.trails,
+    });
+    trailLayer.current = trailVLayer;
+    shipTrailLayer.current = shipTrailVLayer;
+    stationTrailLayer.current = stnTrailVLayer;
+
     const map = new OLMap({
       target: elRef.current,
       layers: [
-        // Dark basemap: its own canvas (className) so the CSS filter doesn't
-        // touch the vector overlays.
-        new TileLayer({ source: new OSM(), className: "ol-basemap-dark" }),
+        ...baseLayers,
+        new VectorLayer({ source: coverage }),
         new VectorLayer({ source: range }),
-        new VectorLayer({ source: trailV }),
-        new VectorLayer({ source: shipTrailV }),
-        new VectorLayer({ source: stnTrailV }),
+        trailVLayer,
+        shipTrailVLayer,
+        stnTrailVLayer,
         new VectorLayer({ source: ships }),
         new VectorLayer({ source: stns }),
         new VectorLayer({ source: planes }),
@@ -341,11 +630,105 @@ export function AdsbMap({
       onSelectRef.current(hit);
     });
 
+    map.on("pointermove", (e) => {
+      const lonLat = toLonLat(e.coordinate);
+      const lon = lonLat[0] ?? 0;
+      const lat = lonLat[1] ?? 0;
+      const rp = refPos.current;
+      const hasRef = rp.lat != null && rp.lon != null;
+      setCursor({
+        lat,
+        lon,
+        dist: hasRef ? distanceNm(rp.lat!, rp.lon!, lat, lon) : null,
+        brg: hasRef ? bearing(rp.lat!, rp.lon!, lat, lon) : null,
+      });
+    });
+
+    const target = map.getTargetElement();
+    target.addEventListener("mouseleave", () => setCursor(null));
+
+    const view = map.getView();
+    const syncZoom = () => setZoom(view.getZoom() ?? 0);
+    view.on("change:resolution", syncZoom);
+    syncZoom();
+
     return () => {
       map.setTarget(undefined);
       mapRef.current = null;
+      basemapLayers.current.clear();
+      trailLayer.current = null;
+      shipTrailLayer.current = null;
+      stationTrailLayer.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    for (const [id, layer] of basemapLayers.current) {
+      layer.setVisible(id === settings.basemap);
+    }
+  }, [settings.basemap]);
+
+  useEffect(() => {
+    trailLayer.current?.setVisible(settings.trails);
+    shipTrailLayer.current?.setVisible(settings.trails);
+    stationTrailLayer.current?.setVisible(settings.trails);
+  }, [settings.trails]);
+
+  useEffect(() => {
+    const onFullscreen = () => {
+      setFullscreen(document.fullscreenElement === rootRef.current);
+      window.setTimeout(() => mapRef.current?.updateSize(), 40);
+    };
+    document.addEventListener("fullscreenchange", onFullscreen);
+    return () => document.removeEventListener("fullscreenchange", onFullscreen);
+  }, []);
+
+  useEffect(() => {
+    if (!followSelected) return;
+    const target = selectedAircraft ?? selectedVessel ?? selectedStation;
+    if (target?.lat == null || target.lon == null) return;
+    mapRef.current
+      ?.getView()
+      .animate({ center: fromLonLat([target.lon, target.lat]), duration: 250 });
+  }, [followSelected, selectedAircraft, selectedVessel, selectedStation]);
+
+  const zoomBy = (delta: number) => {
+    const view = mapRef.current?.getView();
+    if (!view) return;
+    const current = view.getZoom() ?? zoom;
+    view.animate({ zoom: current + delta, duration: 150 });
+  };
+
+  const centerReceiver = () => {
+    if (refLat == null || refLon == null) return;
+    mapRef.current
+      ?.getView()
+      .animate({ center: fromLonLat([refLon, refLat]), zoom: Math.max(zoom, 8), duration: 250 });
+  };
+
+  const fitVisibleTargets = () => {
+    const view = mapRef.current?.getView();
+    if (!view) return;
+    const extent = createEmpty();
+    for (const src of [planeSrc.current, shipSrc.current, stationSrc.current]) {
+      for (const f of src?.getFeatures() ?? []) {
+        const geom = f.getGeometry();
+        if (geom) extend(extent, geom.getExtent());
+      }
+    }
+    if (isEmpty(extent)) {
+      centerReceiver();
+      return;
+    }
+    view.fit(extent, { padding: [80, 80, 80, 80], maxZoom: 11, duration: 300 });
+  };
+
+  const toggleFullscreen = () => {
+    const root = rootRef.current;
+    if (!root) return;
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void root.requestFullscreen();
+  };
 
   // Receiver marker + range rings.
   useEffect(() => {
@@ -354,22 +737,27 @@ export function AdsbMap({
     src.clear();
     if (refLat == null || refLon == null) return;
     const center = [refLon, refLat];
-    for (const nm of [50, 100, 150, 200]) {
-      const ring = new Feature(circular(center, nm * 1852, 96).transform("EPSG:4326", "EPSG:3857"));
-      ring.setStyle(
-        new Style({
-          stroke: new Stroke({ color: "rgba(120,160,200,0.28)", width: 1 }),
-          text: new Text({
-            text: `${nm}`,
-            font: "10px ui-monospace, monospace",
-            fill: new Fill({ color: "rgba(150,180,210,0.6)" }),
-            offsetY: -6,
-            placement: "line",
+    if (settings.rangeRings) {
+      for (const nm of [50, 100, 150, 200]) {
+        const ring = new Feature(
+          circular(center, nm * 1852, 96).transform("EPSG:4326", "EPSG:3857"),
+        );
+        ring.setStyle(
+          new Style({
+            stroke: new Stroke({ color: "rgba(120,160,200,0.28)", width: 1 }),
+            text: new Text({
+              text: `${nm}`,
+              font: "10px ui-monospace, monospace",
+              fill: new Fill({ color: "rgba(150,180,210,0.6)" }),
+              offsetY: -6,
+              placement: "line",
+            }),
           }),
-        }),
-      );
-      src.addFeature(ring);
+        );
+        src.addFeature(ring);
+      }
     }
+    if (!settings.receiver) return;
     const me = new Feature(new Point(fromLonLat(center)));
     me.setStyle(
       new Style({
@@ -381,7 +769,32 @@ export function AdsbMap({
       }),
     );
     src.addFeature(me);
-  }, [refLat, refLon]);
+  }, [refLat, refLon, settings.rangeRings, settings.receiver]);
+
+  // Session coverage: max aircraft range per bearing bin from the receiver.
+  useEffect(() => {
+    const src = coverageSrc.current;
+    if (!src) return;
+    src.clear();
+    const refKey =
+      refLat != null && refLon != null
+        ? `${refLat.toFixed(5)},${refLon.toFixed(5)}`
+        : null;
+    if (coverageRefKey.current !== refKey) {
+      coverageBins.current = Array(COVERAGE_BUCKETS).fill(0);
+      coverageRefKey.current = refKey;
+    }
+    if (!settings.coverage || refLat == null || refLon == null) return;
+    for (const a of aircraft) {
+      if (a.lat == null || a.lon == null) continue;
+      const dist = distanceNm(refLat, refLon, a.lat, a.lon);
+      const brg = bearing(refLat, refLon, a.lat, a.lon);
+      const bin = Math.floor((brg / 360) * COVERAGE_BUCKETS) % COVERAGE_BUCKETS;
+      coverageBins.current[bin] = Math.max(coverageBins.current[bin] ?? 0, dist);
+    }
+    const f = coverageFeature(coverageBins.current, refLat, refLon);
+    if (f) src.addFeature(f);
+  }, [aircraft, refLat, refLon, settings.coverage]);
 
   // Sync aircraft markers + trails with the latest snapshot.
   useEffect(() => {
@@ -396,7 +809,7 @@ export function AdsbMap({
       const coord = fromLonLat([a.lon, a.lat]);
       const color = altColor(a.altitude);
       const { kind } = categoryInfo(a.category);
-      const opacity = Math.max(0.35, 1 - a.seen / STALE_S);
+      const opacity = opacityForAge(a.seen, 0.35, settings.ageFade);
       const isSel = a.icao === selected;
 
       // Trail history.
@@ -453,7 +866,7 @@ export function AdsbMap({
         new Style({
           image: icon(kind, color, ((a.heading ?? 0) * Math.PI) / 180, opacity),
           text: new Text({
-            text: label(a),
+            text: aircraftLabel(a, settings.labelMode, isSel, zoom),
             offsetY: 24,
             font: "600 11px ui-monospace, Menlo, monospace",
             fill: new Fill({ color: "#e8edf6" }),
@@ -480,7 +893,7 @@ export function AdsbMap({
     }
 
     fitOnce(psrc);
-  }, [aircraft, selected]);
+  }, [aircraft, selected, settings.ageFade, settings.labelMode, zoom]);
 
   // Sync vessel markers + trails with the latest snapshot.
   useEffect(() => {
@@ -494,7 +907,7 @@ export function AdsbMap({
       seen.add(v.mmsi);
       const coord = fromLonLat([v.lon, v.lat]);
       const color = vesselColor(v.sog);
-      const opacity = Math.max(0.4, 1 - v.seen / STALE_S);
+      const opacity = opacityForAge(v.seen, 0.4, settings.ageFade);
       const isSel = v.mmsi === selected;
       // Heading if transmitted, else course over ground.
       const rot = ((v.heading ?? v.cog ?? 0) * Math.PI) / 180;
@@ -553,7 +966,7 @@ export function AdsbMap({
         new Style({
           image: shipIcon(color, rot, opacity),
           text: new Text({
-            text: vesselLabel(v),
+            text: vesselMapLabel(v, settings.labelMode, isSel, zoom),
             offsetY: 22,
             font: "600 11px ui-monospace, Menlo, monospace",
             fill: new Fill({ color: "#e8edf6" }),
@@ -580,7 +993,7 @@ export function AdsbMap({
     }
 
     fitOnce(ssrc);
-  }, [vessels, selected]);
+  }, [vessels, selected, settings.ageFade, settings.labelMode, zoom]);
 
   // Sync APRS station markers + trails with the latest snapshot.
   useEffect(() => {
@@ -595,7 +1008,7 @@ export function AdsbMap({
       const coord = fromLonLat([s.lon, s.lat]);
       const kind = aprsKind(s.symbol);
       const color = aprsColor(kind);
-      const opacity = Math.max(0.4, 1 - s.seen / STALE_S);
+      const opacity = opacityForAge(s.seen, 0.4, settings.ageFade);
       const isSel = s.call === selected;
       const rot =
         aprsRotates(kind) && s.course != null
@@ -656,7 +1069,7 @@ export function AdsbMap({
         new Style({
           image: aprsIcon(kind, color, rot, opacity),
           text: new Text({
-            text: stationLabel(s),
+            text: stationMapLabel(s, settings.labelMode, isSel, zoom),
             offsetY: 20,
             font: "600 11px ui-monospace, Menlo, monospace",
             fill: new Fill({ color: "#e8edf6" }),
@@ -683,7 +1096,7 @@ export function AdsbMap({
     }
 
     fitOnce(psrc);
-  }, [stations, selected]);
+  }, [stations, selected, settings.ageFade, settings.labelMode, zoom]);
 
   // Fit the view once to whichever layer first has positioned targets.
   function fitOnce(src: VectorSource) {
@@ -721,12 +1134,87 @@ export function AdsbMap({
       ? bearing(refLat, refLon, target.lat, target.lon!)
       : null;
 
+  const targetHasPosition = target?.lat != null && target.lon != null;
+
   return (
-    <div className="relative h-full w-full">
+    <div ref={rootRef} className="relative h-full w-full bg-background">
       <div ref={elRef} className="h-full w-full" />
+      <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex items-start justify-between gap-3">
+        <div className="pointer-events-auto flex overflow-hidden rounded-md border bg-popover/95">
+          <MapToolButton label="Zoom in" onClick={() => zoomBy(1)}>
+            <Plus />
+          </MapToolButton>
+          <MapToolButton label="Zoom out" onClick={() => zoomBy(-1)}>
+            <Minus />
+          </MapToolButton>
+          <MapToolButton label="Fit targets" onClick={fitVisibleTargets}>
+            <Crosshair />
+          </MapToolButton>
+          <MapToolButton
+            label="Center receiver"
+            onClick={centerReceiver}
+            disabled={refLat == null || refLon == null}
+          >
+            <LocateFixed />
+          </MapToolButton>
+          <MapToolButton
+            label={followSelected ? "Stop following selected" : "Follow selected"}
+            onClick={() => setFollowSelected((v) => !v)}
+            disabled={!targetHasPosition}
+            pressed={followSelected}
+          >
+            <LocateFixed />
+          </MapToolButton>
+          <MapToolButton
+            label={fullscreen ? "Exit fullscreen" : "Fullscreen map"}
+            onClick={toggleFullscreen}
+            pressed={fullscreen}
+          >
+            <Maximize2 />
+          </MapToolButton>
+        </div>
+
+        <div className="pointer-events-auto flex flex-col items-end gap-2">
+          <div className="flex items-center gap-1 rounded-md border bg-popover/95 p-1">
+            <Select
+              value={settings.basemap}
+              onValueChange={(v) => setMapSettings({ basemap: v as BasemapId })}
+            >
+              <SelectTrigger className="h-7 w-32 border-0 bg-transparent px-2 font-mono text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                {BASEMAPS.map((b) => (
+                  <SelectItem key={b.id} value={b.id}>
+                    {b.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              size="icon-sm"
+              variant={settingsOpen ? "secondary" : "ghost"}
+              onClick={() => setSettingsOpen((v) => !v)}
+              aria-expanded={settingsOpen}
+              aria-label="Map settings"
+              title="Map settings"
+            >
+              <Settings2 />
+            </Button>
+          </div>
+
+          {settingsOpen && (
+            <MapSettingsPanel settings={settings} onChange={setMapSettings} />
+          )}
+        </div>
+      </div>
+
+      {settings.legend && <MapLegend />}
+      {settings.readouts && <MapReadouts cursor={cursor} zoom={zoom} />}
+
       <div
         ref={popupRef}
-        className={`pointer-events-none w-52 -translate-x-1/2 rounded-md border bg-popover/95 p-2.5 text-[11px] shadow-lg backdrop-blur ${
+        className={`pointer-events-none w-52 -translate-x-1/2 rounded-md border bg-popover/95 p-2.5 text-[11px] shadow-sm backdrop-blur ${
           target ? "" : "hidden"
         }`}
       >
@@ -822,6 +1310,193 @@ export function AdsbMap({
         )}
       </div>
     </div>
+  );
+}
+
+function MapToolButton({
+  label,
+  onClick,
+  disabled,
+  pressed,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  pressed?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <Button
+      size="icon-sm"
+      variant={pressed ? "secondary" : "ghost"}
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      aria-pressed={pressed}
+      title={label}
+      className="border-0"
+    >
+      {children}
+    </Button>
+  );
+}
+
+function MapSettingsPanel({
+  settings,
+  onChange,
+}: {
+  settings: MapSettings;
+  onChange: (patch: Partial<MapSettings>) => void;
+}) {
+  return (
+    <div className="w-56 rounded-md border bg-popover/95 p-2 text-xs backdrop-blur">
+      <div className="mb-2 grid gap-1.5">
+        <Label className="text-[11px] text-muted-foreground">Labels</Label>
+        <Select
+          value={settings.labelMode}
+          onValueChange={(v) => onChange({ labelMode: v as LabelMode })}
+        >
+          <SelectTrigger className="h-7 w-full px-2 font-mono text-[11px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent align="end">
+            {LABEL_MODES.map((m) => (
+              <SelectItem key={m.id} value={m.id}>
+                {m.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="grid gap-2">
+        <MapSwitch
+          label="Trails"
+          checked={settings.trails}
+          onCheckedChange={(trails) => onChange({ trails })}
+        />
+        <MapSwitch
+          label="Range rings"
+          checked={settings.rangeRings}
+          onCheckedChange={(rangeRings) => onChange({ rangeRings })}
+        />
+        <MapSwitch
+          label="Receiver"
+          checked={settings.receiver}
+          onCheckedChange={(receiver) => onChange({ receiver })}
+        />
+        <MapSwitch
+          label="Coverage"
+          checked={settings.coverage}
+          onCheckedChange={(coverage) => onChange({ coverage })}
+        />
+        <MapSwitch
+          label="Legend"
+          checked={settings.legend}
+          onCheckedChange={(legend) => onChange({ legend })}
+        />
+        <MapSwitch
+          label="Readouts"
+          checked={settings.readouts}
+          onCheckedChange={(readouts) => onChange({ readouts })}
+        />
+        <MapSwitch
+          label="Age fade"
+          checked={settings.ageFade}
+          onCheckedChange={(ageFade) => onChange({ ageFade })}
+        />
+      </div>
+    </div>
+  );
+}
+
+function MapSwitch({
+  label,
+  checked,
+  onCheckedChange,
+}: {
+  label: string;
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+}) {
+  return (
+    <Label className="flex items-center justify-between gap-3 text-[11px] text-foreground/80">
+      <span>{label}</span>
+      <Switch size="sm" checked={checked} onCheckedChange={onCheckedChange} />
+    </Label>
+  );
+}
+
+function MapLegend() {
+  return (
+    <div className="pointer-events-none absolute bottom-3 left-3 z-10 w-52 rounded-md border bg-popover/95 p-2 font-mono text-[10px] text-muted-foreground backdrop-blur">
+      <div className="mb-1 flex items-center justify-between">
+        <span>Altitude</span>
+        <span>ft</span>
+      </div>
+      <div className="h-2 rounded-sm bg-[linear-gradient(90deg,#22d3ee,#34d399,#fbbf24,#f87171)]" />
+      <div className="mt-1 flex justify-between tabular-nums">
+        <span>0</span>
+        <span>20k</span>
+        <span>32k</span>
+        <span>40k+</span>
+      </div>
+      <div className="mt-2 grid grid-cols-3 gap-1 text-[9px]">
+        <LegendChip color="#22d3ee" label="ADS-B" />
+        <LegendChip color="#2dd4bf" label="AIS" />
+        <LegendChip color="#a78bfa" label="APRS" />
+      </div>
+      <div className="mt-1 flex items-center gap-1 text-[9px]">
+        <span className="h-2 w-5 rounded-sm bg-primary/25 ring-1 ring-primary/50" />
+        <span>coverage</span>
+      </div>
+    </div>
+  );
+}
+
+function LegendChip({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1">
+      <span
+        className="size-2 rounded-full ring-1 ring-background"
+        style={{ backgroundColor: color }}
+      />
+      {label}
+    </span>
+  );
+}
+
+function MapReadouts({
+  cursor,
+  zoom,
+}: {
+  cursor: { lat: number; lon: number; dist: number | null; brg: number | null } | null;
+  zoom: number;
+}) {
+  return (
+    <div className="pointer-events-none absolute bottom-3 right-3 z-10 flex max-w-[calc(100%-16rem)] flex-wrap justify-end gap-x-3 gap-y-1 rounded-md border bg-popover/95 px-2 py-1.5 font-mono text-[10px] text-muted-foreground backdrop-blur">
+      <Readout label="Z" value={zoom.toFixed(1)} />
+      <Readout label="LAT" value={cursor ? cursor.lat.toFixed(5) : "—"} />
+      <Readout label="LON" value={cursor ? cursor.lon.toFixed(5) : "—"} />
+      <Readout
+        label="DIST"
+        value={cursor?.dist != null ? `${cursor.dist.toFixed(1)} NM` : "—"}
+      />
+      <Readout
+        label="BRG"
+        value={cursor?.brg != null ? `${cursor.brg.toFixed(0)}°` : "—"}
+      />
+    </div>
+  );
+}
+
+function Readout({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="flex items-center gap-1 tabular-nums">
+      <span className="text-muted-foreground/60">{label}</span>
+      <span className="text-foreground/80">{value}</span>
+    </span>
   );
 }
 

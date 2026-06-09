@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type AircraftReport,
+  type AptLineFrame,
   type AudioFrame,
   type ClientMessage,
   type DeviceInfo,
@@ -16,6 +17,7 @@ import {
   type StationReport,
   type VesselReport,
   BinaryFrameType,
+  decodeAptLine,
   decodeAudioFrame,
   decodeFftFrame,
   frameType,
@@ -23,6 +25,7 @@ import {
 
 type FftCb = (f: FftFrame) => void;
 type AudioCb = (f: AudioFrame) => void;
+type AptCb = (f: AptLineFrame) => void;
 
 export interface SignalState {
   channelDb: number;
@@ -33,6 +36,13 @@ export interface IsmStats {
   bursts: number;
   decoded: number;
   noiseDb: number;
+  freqHz: number;
+}
+
+export interface AptStats {
+  lines: number;
+  sync: number;
+  levelDb: number;
   freqHz: number;
 }
 
@@ -61,12 +71,14 @@ export function useRadio() {
   const [aprsFramesSeen, setAprsFramesSeen] = useState(0);
   const [ismEvents, setIsmEvents] = useState<IsmEvent[]>([]);
   const [ismStats, setIsmStats] = useState<IsmStats | null>(null);
+  const [aptStats, setAptStats] = useState<AptStats | null>(null);
   const [scan, setScan] = useState<ScanStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const fftSubs = useRef(new Set<FftCb>());
   const audioSubs = useRef(new Set<AudioCb>());
+  const aptSubs = useRef(new Set<AptCb>());
   const sendQueue = useRef<ClientMessage[]>([]);
 
   useEffect(() => {
@@ -105,6 +117,11 @@ export function useRadio() {
           case BinaryFrameType.AUDIO: {
             const f = decodeAudioFrame(buf);
             for (const cb of audioSubs.current) cb(f);
+            break;
+          }
+          case BinaryFrameType.APT_LINE: {
+            const f = decodeAptLine(buf);
+            for (const cb of aptSubs.current) cb(f);
             break;
           }
         }
@@ -146,6 +163,14 @@ export function useRadio() {
           });
           setIsmEvents((prev) => mergeIsm(prev, msg.events));
           break;
+        case "apt":
+          setAptStats({
+            lines: msg.lines,
+            sync: msg.sync,
+            levelDb: msg.levelDb,
+            freqHz: msg.freqHz,
+          });
+          break;
         case "scan":
           setScan(msg.status);
           break;
@@ -183,6 +208,13 @@ export function useRadio() {
     };
   }, []);
 
+  const subscribeApt = useCallback((cb: AptCb) => {
+    aptSubs.current.add(cb);
+    return () => {
+      aptSubs.current.delete(cb);
+    };
+  }, []);
+
   return {
     connected,
     state,
@@ -198,10 +230,12 @@ export function useRadio() {
     aprsFramesSeen,
     ismEvents,
     ismStats,
+    aptStats,
     scan,
     error,
     send,
     subscribeFft,
     subscribeAudio,
+    subscribeApt,
   };
 }
