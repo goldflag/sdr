@@ -11,6 +11,8 @@ import {
   type FftFrame,
   type IsmEvent,
   type RadioState,
+  type RdsStation,
+  type RdsStats,
   type ScanStatus,
   type ServerMessage,
   type StationReport,
@@ -61,6 +63,8 @@ export function useRadio() {
   const [aprsFramesSeen, setAprsFramesSeen] = useState(0);
   const [ismEvents, setIsmEvents] = useState<IsmEvent[]>([]);
   const [ismStats, setIsmStats] = useState<IsmStats | null>(null);
+  const [rdsStation, setRdsStation] = useState<RdsStation | null>(null);
+  const [rdsStats, setRdsStats] = useState<RdsStats | null>(null);
   const [scan, setScan] = useState<ScanStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -146,6 +150,10 @@ export function useRadio() {
           });
           setIsmEvents((prev) => mergeIsm(prev, msg.events));
           break;
+        case "rds":
+          setRdsStation(msg.station);
+          setRdsStats(msg.stats);
+          break;
         case "scan":
           setScan(msg.status);
           break;
@@ -198,6 +206,8 @@ export function useRadio() {
     aprsFramesSeen,
     ismEvents,
     ismStats,
+    rdsStation,
+    rdsStats,
     scan,
     error,
     send,

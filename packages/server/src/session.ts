@@ -46,6 +46,7 @@ const ADSB_BROADCAST_MS = 1000; // aircraft table refresh rate
 const AIS_BROADCAST_MS = 1000; // vessel table refresh rate
 const APRS_BROADCAST_MS = 1000; // station table refresh rate
 const ISM_BROADCAST_MS = 500; // ISM event log refresh rate
+const RDS_BROADCAST_MS = 1000; // RDS station refresh rate (WFM only)
 // When several map layers are enabled, the dongle round-robins across them.
 const LAYER_DWELL_MS = 5000; // time spent on each band before rotating
 const LAYER_SETTLE_MS = 300; // ignore IQ right after a retune (tuner transient)
@@ -94,6 +95,7 @@ export class Radio {
   private lastAprs = 0;
   private lastAprsCount = 0;
   private lastIsm = 0;
+  private lastRds = 0;
   // Round-robin scheduler for the map decode layers.
   private mapActive = false;
   private mapTimer: ReturnType<typeof setInterval> | null = null;
@@ -205,6 +207,7 @@ export class Radio {
         this.state.centerHz = msg.hz;
         this.client?.setFrequency(msg.hz);
         this.syncNotches();
+        this.demod.resetRds(); // different station — drop the old RDS data
         break;
       case "setSampleRate":
         this.state.sampleRate = msg.hz;
@@ -283,6 +286,7 @@ export class Radio {
         this.state.vfoOffset = msg.hz;
         this.vfo.setFreq(-msg.hz); // bring the VFO down to DC
         this.syncNotches();
+        this.demod.resetRds(); // tuned to a different station within the band
         break;
       case "setAdsb":
         this.setLayer("adsb", msg.on);
@@ -683,6 +687,17 @@ export class Radio {
         type: "signal",
         channelDb: powerDb,
         squelchOpen: squelchOpen,
+      });
+    }
+
+    // RDS rides along with WFM demodulation; in other modes the decoder isn't
+    // fed, so it reports a null station (which clears the client panel).
+    if (now - this.lastRds >= RDS_BROADCAST_MS) {
+      this.lastRds = now;
+      this.sinks.json({
+        type: "rds",
+        station: this.demod.rdsStation(),
+        stats: this.demod.rdsStats(),
       });
     }
   }

@@ -354,6 +354,56 @@ export interface IsmEvent {
   snrDb: number;
 }
 
+/** A broadcast-FM clock-time (RDS group 4A). */
+export interface RdsClockTime {
+  /** Local time the station broadcast, ISO 8601 with offset (e.g. "2026-06-09T14:30-05:00"). */
+  iso: string;
+  /** UTC epoch milliseconds of that minute. */
+  epoch: number;
+}
+
+/**
+ * Decoded RDS (Radio Data System / RBDS) information for the FM station the
+ * receiver is tuned to. Fields fill in as groups arrive — PI almost immediately,
+ * the 8-char Programme Service name and 64-char RadioText over a few seconds.
+ */
+export interface RdsStation {
+  /** Programme Identification code, 16-bit, hex (e.g. "54C4"). */
+  pi: string;
+  /** Call sign derived from PI via the RBDS (North America) algorithm, when decodable. */
+  callSign?: string;
+  /** Programme Service name, up to 8 characters. */
+  ps?: string;
+  /** RadioText, up to 64 characters. */
+  radioText?: string;
+  /** Programme TYpe code, 0–31. */
+  pty?: number;
+  /** Programme Type name (RBDS table). */
+  ptyName?: string;
+  /** Traffic Programme flag — the station carries traffic announcements. */
+  tp?: boolean;
+  /** Traffic Announcement in progress right now. */
+  ta?: boolean;
+  /** Programme is music (true) or speech (false). */
+  music?: boolean;
+  /** Stereo broadcast (decoder-identification bit). */
+  stereo?: boolean;
+  /** Alternative frequencies for this programme, in MHz. */
+  altFreqs?: number[];
+  /** Most recent clock-time (group 4A). */
+  clock?: RdsClockTime;
+}
+
+/** RDS decoder link-quality stats for the panel. */
+export interface RdsStats {
+  /** Complete groups decoded (all four blocks recovered) since the last tune. */
+  groups: number;
+  /** Fraction of blocks failing their CRC, 0–1 (a link-quality gauge). */
+  blockErrorRate: number;
+  /** True while the decoder holds block synchronisation. */
+  synced: boolean;
+}
+
 export interface DeviceInfo {
   tuner: TunerType;
   tunerName: string;
@@ -443,6 +493,12 @@ export type ServerMessage =
       noiseDb: number;
       freqHz: number;
     }
+  /**
+   * Decoded RDS for the tuned FM station (only in WFM mode). `station` is null
+   * until a Programme Identification code is recovered; `stats` reports link
+   * quality. Sent ~1×/s and reset on every retune or mode change.
+   */
+  | { type: "rds"; station: RdsStation | null; stats: RdsStats }
   /** Scanner status, or null when scanning stops. */
   | { type: "scan"; status: ScanStatus | null }
   | { type: "error"; message: string };

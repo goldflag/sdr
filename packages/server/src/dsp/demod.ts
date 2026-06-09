@@ -29,6 +29,8 @@ import {
 import { LinearResampler } from "./resample";
 import { Nco } from "./nco";
 import { AudioAgc, LmsDenoiser, NoiseBlanker } from "./enhance";
+import { RdsDecoder } from "./rds";
+import type { RdsStation, RdsStats } from "@sdr/shared";
 
 /** Target intermediate (channel) rate per mode, before final resample to 48k. */
 const TARGET_IF: Record<Mode, number> = {
@@ -87,6 +89,9 @@ export class Demodulator {
   private notchOffsets: number[] = []; // Hz relative to VFO
   private notches: ComplexNotch[] = [];
 
+  // RDS data decoder, fed the WFM multiplex (MPX) before de-emphasis.
+  private rds = new RdsDecoder();
+
   constructor() {
     const bw = 200_000;
     this.configure("WFM", 1_024_000, -bw / 2, bw / 2);
@@ -125,6 +130,10 @@ export class Demodulator {
 
     // De-emphasis coefficient (WFM).
     this.deemphA = 1 - Math.exp(-1 / (this.channelRate * DEEMPHASIS_TAU));
+
+    // RDS runs on the WFM multiplex at the channel rate; (re)configuring it also
+    // clears any station decoded for the previous tuning.
+    this.rds.configure(this.channelRate);
 
     // Generalised Weaver passband: shift centre -> DC, low-pass ±width/2.
     this.passDown = new Nco(this.channelRate, -center);
@@ -169,6 +178,21 @@ export class Demodulator {
     this.notches = this.notchOffsets.map(
       (off) => new ComplexNotch(off, this.channelRate),
     );
+  }
+
+  // --- RDS (broadcast-FM data) ---
+
+  /** Decoded RDS station for the current tuning, or null (WFM only). */
+  rdsStation(): RdsStation | null {
+    return this.rds.snapshot();
+  }
+  /** RDS link-quality stats. */
+  rdsStats(): RdsStats {
+    return this.rds.stats();
+  }
+  /** Drop the decoded RDS station and re-acquire (call on retune within a band). */
+  resetRds() {
+    this.rds.reset();
   }
 
   /** `iq` is interleaved complex at fs, signal of interest centered at DC. */
@@ -226,6 +250,9 @@ export class Demodulator {
     this.prevQ = pQ;
 
     if (this.mode === "WFM") {
+      // The raw discriminator output is the full FM multiplex — feed it to the
+      // RDS decoder before de-emphasis rolls off the 57 kHz subcarrier.
+      this.rds.process(out, n);
       // 1-pole de-emphasis
       let y = this.deemph;
       const a = this.deemphA;

@@ -16,6 +16,7 @@ import { AprsPanel } from "@/components/AprsPanel";
 import { Section } from "@/components/Controls";
 import { IsmPanel } from "@/components/IsmPanel";
 import { IsmConsole } from "@/components/IsmConsole";
+import { RdsPanel } from "@/components/RdsPanel";
 import {
   SpectrumDisplay,
   DEFAULT_DISPLAY,
@@ -265,6 +266,11 @@ export default function App() {
                 deviceInfo={radio.deviceInfo}
                 signal={radio.signal}
                 send={radio.send}
+              />
+              <RdsPanel
+                station={radio.rdsStation}
+                stats={radio.rdsStats}
+                mode={state.mode}
               />
               <SpectrumDisplay display={display} onChange={updateDisplay} />
             </>
