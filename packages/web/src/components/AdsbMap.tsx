@@ -1,10 +1,11 @@
-// Live ADS-B map. Renders each positioned aircraft as a category-shaped,
-// heading-rotated, altitude-colored marker on a dark OpenLayers/OSM map, with
-// fading by age, flight trails, an optional receiver marker + range rings, a
-// click-to-select detail popup, and table<->map selection linking.
+// Live ADS-B / AIS map. Renders each positioned aircraft (category-shaped,
+// heading-rotated, altitude-colored) and vessel (heading-rotated ship marker)
+// on a dark OpenLayers/OSM map, with fading by age, trails, an optional receiver
+// marker + range rings, a click-to-select detail popup, and table<->map
+// selection linking.
 
 import { useEffect, useMemo, useRef } from "react";
-import type { AircraftReport } from "@sdr/shared";
+import type { AircraftReport, VesselReport } from "@sdr/shared";
 import OLMap from "ol/Map";
 import View from "ol/View";
 import TileLayer from "ol/layer/Tile";
@@ -30,9 +31,10 @@ import { distanceNm, bearing } from "@/lib/geo";
 import "ol/ol.css";
 
 interface Props {
-  aircraft: AircraftReport[];
+  aircraft?: AircraftReport[];
+  vessels?: VesselReport[];
   selected: string | null;
-  onSelect: (icao: string | null) => void;
+  onSelect: (id: string | null) => void;
   refLat: number | null;
   refLon: number | null;
 }
@@ -88,6 +90,33 @@ function icon(kind: AircraftKind, color: string, rotation: number, opacity: numb
   });
 }
 
+// Ship marker: a stylised hull pointing "up" (rotated to heading/course).
+function shipSvg(color: string): string {
+  return svg(
+    22,
+    `<path d="M12 2 C14 6 15 9 15 14 L15 19 C15 20.5 13.7 21.5 12 21.5 C10.3 21.5 9 20.5 9 19 L9 14 C9 9 10 6 12 2 Z" ` +
+      `fill="${color}" stroke="#0b0f1a" stroke-width="0.9" stroke-linejoin="round"/>`,
+  );
+}
+
+function shipIcon(color: string, rotation: number, opacity: number) {
+  return new Icon({ src: shipSvg(color), rotation, opacity, rotateWithView: true });
+}
+
+// Colour a vessel by speed over ground: stationary → slate, fast → warm.
+function vesselColor(sog?: number): string {
+  if (sog == null) return "#94a3b8";
+  if (sog < 0.5) return "#64748b"; // moored / anchored
+  if (sog < 7) return "#2dd4bf"; // typical transit
+  if (sog < 15) return "#38bdf8";
+  return "#a78bfa"; // fast craft
+}
+
+function vesselLabel(v: VesselReport): string {
+  const id = v.name?.trim() || v.mmsi;
+  return v.sog != null && v.sog >= 0.5 ? `${id}\n${v.sog.toFixed(1)} kt` : id;
+}
+
 function altColor(alt?: number): string {
   if (alt == null) return "#9ca3af";
   const t = Math.min(1, Math.max(0, alt / 40000));
@@ -108,17 +137,29 @@ function label(a: AircraftReport): string {
   return alt ? `${id}\n${alt}` : id;
 }
 
-export function AdsbMap({ aircraft, selected, onSelect, refLat, refLon }: Props) {
+export function AdsbMap({
+  aircraft = [],
+  vessels = [],
+  selected,
+  onSelect,
+  refLat,
+  refLon,
+}: Props) {
   const elRef = useRef<HTMLDivElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<OLMap | null>(null);
   const planeSrc = useRef<VectorSource | null>(null);
   const trailSrc = useRef<VectorSource | null>(null);
   const rangeSrc = useRef<VectorSource | null>(null);
+  const shipSrc = useRef<VectorSource | null>(null);
+  const shipTrailSrc = useRef<VectorSource | null>(null);
   const overlayRef = useRef<Overlay | null>(null);
   const planeFeats = useRef(new Map<string, Feature>());
   const trailFeats = useRef(new Map<string, Feature>());
   const trails = useRef(new Map<string, number[][]>());
+  const shipFeats = useRef(new Map<string, Feature>());
+  const shipTrailFeats = useRef(new Map<string, Feature>());
+  const shipTrails = useRef(new Map<string, number[][]>());
   const didFit = useRef(false);
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
@@ -127,6 +168,10 @@ export function AdsbMap({ aircraft, selected, onSelect, refLat, refLon }: Props)
     () => aircraft.find((a) => a.icao === selected) ?? null,
     [aircraft, selected],
   );
+  const selectedVessel = useMemo(
+    () => vessels.find((v) => v.mmsi === selected) ?? null,
+    [vessels, selected],
+  );
 
   // One-time map setup.
   useEffect(() => {
@@ -134,9 +179,13 @@ export function AdsbMap({ aircraft, selected, onSelect, refLat, refLon }: Props)
     const planes = new VectorSource();
     const trailV = new VectorSource();
     const range = new VectorSource();
+    const ships = new VectorSource();
+    const shipTrailV = new VectorSource();
     planeSrc.current = planes;
     trailSrc.current = trailV;
     rangeSrc.current = range;
+    shipSrc.current = ships;
+    shipTrailSrc.current = shipTrailV;
 
     const map = new OLMap({
       target: elRef.current,
@@ -146,6 +195,8 @@ export function AdsbMap({ aircraft, selected, onSelect, refLat, refLon }: Props)
         new TileLayer({ source: new OSM(), className: "ol-basemap-dark" }),
         new VectorLayer({ source: range }),
         new VectorLayer({ source: trailV }),
+        new VectorLayer({ source: shipTrailV }),
+        new VectorLayer({ source: ships }),
         new VectorLayer({ source: planes }),
       ],
       view: new View({ center: fromLonLat([-98, 39]), zoom: 4 }),
@@ -169,7 +220,7 @@ export function AdsbMap({ aircraft, selected, onSelect, refLat, refLon }: Props)
       map.forEachFeatureAtPixel(
         e.pixel,
         (f) => {
-          const id = f.get("icao");
+          const id = f.get("icao") ?? f.get("mmsi");
           if (id) {
             hit = id;
             return true;
@@ -318,37 +369,143 @@ export function AdsbMap({ aircraft, selected, onSelect, refLat, refLon }: Props)
       }
     }
 
-    if (!didFit.current && planeFeats.current.size > 0) {
-      const extent = psrc.getExtent();
-      if (extent && Number.isFinite(extent[0]!)) {
-        mapRef.current
-          ?.getView()
-          .fit(extent, { padding: [70, 70, 70, 70], maxZoom: 10, duration: 400 });
-        didFit.current = true;
-      }
-    }
+    fitOnce(psrc);
   }, [aircraft, selected]);
 
-  // Position the detail popup over the selected aircraft.
+  // Sync vessel markers + trails with the latest snapshot.
+  useEffect(() => {
+    const ssrc = shipSrc.current;
+    const tsrc = shipTrailSrc.current;
+    if (!ssrc || !tsrc) return;
+    const seen = new Set<string>();
+
+    for (const v of vessels) {
+      if (v.lat == null || v.lon == null) continue;
+      seen.add(v.mmsi);
+      const coord = fromLonLat([v.lon, v.lat]);
+      const color = vesselColor(v.sog);
+      const opacity = Math.max(0.4, 1 - v.seen / STALE_S);
+      const isSel = v.mmsi === selected;
+      // Heading if transmitted, else course over ground.
+      const rot = ((v.heading ?? v.cog ?? 0) * Math.PI) / 180;
+
+      // Trail history.
+      let path = shipTrails.current.get(v.mmsi);
+      if (!path) {
+        path = [];
+        shipTrails.current.set(v.mmsi, path);
+      }
+      const last = path[path.length - 1];
+      if (!last || last[0] !== coord[0] || last[1] !== coord[1]) {
+        path.push(coord);
+        if (path.length > MAX_TRAIL) path.shift();
+      }
+      let tf = shipTrailFeats.current.get(v.mmsi);
+      if (!tf) {
+        tf = new Feature(new LineString(path));
+        shipTrailFeats.current.set(v.mmsi, tf);
+        tsrc.addFeature(tf);
+      } else {
+        (tf.getGeometry() as LineString).setCoordinates(path);
+      }
+      tf.setStyle(
+        new Style({
+          stroke: new Stroke({
+            color: isSel ? color : "rgba(120,180,190,0.4)",
+            width: isSel ? 2 : 1,
+          }),
+        }),
+      );
+
+      // Marker.
+      let f = shipFeats.current.get(v.mmsi);
+      if (!f) {
+        f = new Feature({ geometry: new Point(coord) });
+        f.set("mmsi", v.mmsi);
+        shipFeats.current.set(v.mmsi, f);
+        ssrc.addFeature(f);
+      } else {
+        (f.getGeometry() as Point).setCoordinates(coord);
+      }
+      const styles: Style[] = [];
+      if (isSel) {
+        styles.push(
+          new Style({
+            image: new CircleStyle({
+              radius: 14,
+              stroke: new Stroke({ color: "#e5e7eb", width: 2 }),
+              fill: new Fill({ color: "rgba(229,231,235,0.12)" }),
+            }),
+          }),
+        );
+      }
+      styles.push(
+        new Style({
+          image: shipIcon(color, rot, opacity),
+          text: new Text({
+            text: vesselLabel(v),
+            offsetY: 22,
+            font: "600 11px ui-monospace, Menlo, monospace",
+            fill: new Fill({ color: "#e8edf6" }),
+            stroke: new Stroke({ color: "rgba(8,12,20,0.9)", width: 3 }),
+            textAlign: "center",
+          }),
+        }),
+      );
+      f.setStyle(styles);
+    }
+
+    // Drop vessels that aged out of the snapshot.
+    for (const [mmsi, f] of shipFeats.current) {
+      if (!seen.has(mmsi)) {
+        ssrc.removeFeature(f);
+        shipFeats.current.delete(mmsi);
+        const tf = shipTrailFeats.current.get(mmsi);
+        if (tf) {
+          tsrc.removeFeature(tf);
+          shipTrailFeats.current.delete(mmsi);
+        }
+        shipTrails.current.delete(mmsi);
+      }
+    }
+
+    fitOnce(ssrc);
+  }, [vessels, selected]);
+
+  // Fit the view once to whichever layer first has positioned targets.
+  function fitOnce(src: VectorSource) {
+    if (didFit.current || src.getFeatures().length === 0) return;
+    const extent = src.getExtent();
+    if (extent && Number.isFinite(extent[0]!)) {
+      mapRef.current
+        ?.getView()
+        .fit(extent, { padding: [70, 70, 70, 70], maxZoom: 11, duration: 400 });
+      didFit.current = true;
+    }
+  }
+
+  // Position the detail popup over the selected target.
   useEffect(() => {
     const ov = overlayRef.current;
     if (!ov) return;
-    if (selectedAircraft?.lat != null && selectedAircraft.lon != null) {
-      ov.setPosition(fromLonLat([selectedAircraft.lon, selectedAircraft.lat]));
+    const t = selectedAircraft ?? selectedVessel;
+    if (t?.lat != null && t.lon != null) {
+      ov.setPosition(fromLonLat([t.lon, t.lat]));
     } else {
       ov.setPosition(undefined);
     }
-  }, [selectedAircraft]);
+  }, [selectedAircraft, selectedVessel]);
 
   const sel = selectedAircraft;
   const info = sel ? icaoInfo(sel.icao) : null;
+  const target = selectedAircraft ?? selectedVessel;
   const dist =
-    sel?.lat != null && refLat != null && refLon != null
-      ? distanceNm(refLat, refLon, sel.lat, sel.lon!)
+    target?.lat != null && refLat != null && refLon != null
+      ? distanceNm(refLat, refLon, target.lat, target.lon!)
       : null;
   const brg =
-    sel?.lat != null && refLat != null && refLon != null
-      ? bearing(refLat, refLon, sel.lat, sel.lon!)
+    target?.lat != null && refLat != null && refLon != null
+      ? bearing(refLat, refLon, target.lat, target.lon!)
       : null;
 
   return (
@@ -357,7 +514,7 @@ export function AdsbMap({ aircraft, selected, onSelect, refLat, refLon }: Props)
       <div
         ref={popupRef}
         className={`pointer-events-none w-52 -translate-x-1/2 rounded-md border bg-popover/95 p-2.5 text-[11px] shadow-lg backdrop-blur ${
-          sel ? "" : "hidden"
+          target ? "" : "hidden"
         }`}
       >
         {sel && (
@@ -379,6 +536,32 @@ export function AdsbMap({ aircraft, selected, onSelect, refLat, refLon }: Props)
               {dist != null && <Row k="Dist" v={`${dist.toFixed(0)} NM`} />}
               {brg != null && <Row k="Brg" v={`${brg.toFixed(0)}°`} />}
               <Row k="Sig" v={sel.rssi != null ? `${sel.rssi} dB` : "—"} />
+            </dl>
+          </>
+        )}
+        {!sel && selectedVessel && (
+          <>
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <span className="font-mono text-xs font-semibold text-foreground">
+                {selectedVessel.name?.trim() || selectedVessel.mmsi}
+              </span>
+              {selectedVessel.channel && (
+                <span className="text-[10px] text-muted-foreground">
+                  ch {selectedVessel.channel}
+                </span>
+              )}
+            </div>
+            <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono text-muted-foreground">
+              <Row k="MMSI" v={selectedVessel.mmsi} />
+              {selectedVessel.callsign && <Row k="Call" v={selectedVessel.callsign} />}
+              <Row k="Type" v={selectedVessel.shipType ?? (selectedVessel.classB ? "Class B" : "—")} />
+              <Row k="SOG" v={selectedVessel.sog != null ? `${selectedVessel.sog.toFixed(1)} kt` : "—"} />
+              <Row k="COG" v={selectedVessel.cog != null ? `${selectedVessel.cog.toFixed(0)}°` : "—"} />
+              <Row k="Hdg" v={selectedVessel.heading != null ? `${selectedVessel.heading}°` : "—"} />
+              {selectedVessel.navStatus && <Row k="Status" v={selectedVessel.navStatus} />}
+              {dist != null && <Row k="Dist" v={`${dist.toFixed(0)} NM`} />}
+              {brg != null && <Row k="Brg" v={`${brg.toFixed(0)}°`} />}
+              <Row k="Sig" v={selectedVessel.rssi != null ? `${selectedVessel.rssi} dB` : "—"} />
             </dl>
           </>
         )}

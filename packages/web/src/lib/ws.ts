@@ -12,6 +12,7 @@ import {
   type RadioState,
   type ScanStatus,
   type ServerMessage,
+  type VesselReport,
   BinaryFrameType,
   decodeAudioFrame,
   decodeFftFrame,
@@ -33,6 +34,9 @@ export function useRadio() {
   const [signal, setSignal] = useState<SignalState | null>(null);
   const [aircraft, setAircraft] = useState<AircraftReport[]>([]);
   const [messageRate, setMessageRate] = useState(0);
+  const [vessels, setVessels] = useState<VesselReport[]>([]);
+  const [aisMessageRate, setAisMessageRate] = useState(0);
+  const [aisFramesSeen, setAisFramesSeen] = useState(0);
   const [scan, setScan] = useState<ScanStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -99,6 +103,11 @@ export function useRadio() {
           setAircraft(msg.aircraft);
           setMessageRate(msg.messageRate);
           break;
+        case "ais":
+          setVessels(msg.vessels);
+          setAisMessageRate(msg.messageRate);
+          setAisFramesSeen(msg.framesSeen);
+          break;
         case "scan":
           setScan(msg.status);
           break;
@@ -143,6 +152,9 @@ export function useRadio() {
     signal,
     aircraft,
     messageRate,
+    vessels,
+    aisMessageRate,
+    aisFramesSeen,
     scan,
     error,
     send,

@@ -8,7 +8,8 @@
     "build": "bun build src/index.ts --target=bun --outdir dist",
     "typecheck": "tsc --noEmit",
     "test:dsp": "bun run src/dsp/selftest.ts",
-    "test:adsb": "bun run src/dsp/adsb-selftest.ts"
+    "test:adsb": "bun run src/dsp/adsb-selftest.ts",
+    "test:ais": "bun run src/dsp/ais-selftest.ts"
   },
   "dependencies": {
     "@sdr/shared": "workspace:*",

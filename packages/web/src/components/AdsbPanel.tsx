@@ -129,7 +129,7 @@ export function AdsbPanel(p: Props) {
   );
 }
 
-function RefControls({
+export function RefControls({
   refLat,
   refLon,
   onSetRef,

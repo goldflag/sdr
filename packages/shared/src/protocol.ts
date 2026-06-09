@@ -54,6 +54,17 @@ export function defaultEdges(mode: Mode, bw: number): [number, number] {
 export const ADSB_FREQ_HZ = 1_090_000_000;
 export const ADSB_SAMPLE_RATE = 2_000_000; // 2 samples per Mode S bit
 
+/**
+ * AIS (marine traffic) operating point. The two AIS channels sit at 161.975 MHz
+ * (A / 87B) and 162.025 MHz (B / 88B) — 50 kHz apart — so we centre between them
+ * and capture both at once. 240 kSPS decimates by 5 to 48 kSPS (exactly 5
+ * samples per 9600-baud GMSK symbol).
+ */
+export const AIS_FREQ_HZ = 162_000_000;
+export const AIS_SAMPLE_RATE = 240_000;
+/** Channel offsets from the AIS centre frequency, in Hz. */
+export const AIS_CHANNELS = { A: -25_000, B: 25_000 } as const;
+
 /** Direct-sampling mode values passed straight to rtl_tcp / librtlsdr. */
 export const DIRECT_SAMPLING = {
   OFF: 0,
@@ -196,7 +207,9 @@ export type ClientMessage =
   /** Toggle ADS-B mode: retunes to 1090 MHz @ 2 MSPS and decodes Mode S. */
   | { type: "setAdsb"; on: boolean }
   /** Receiver location for single-frame (local) CPR position decoding. */
-  | { type: "setAdsbRef"; lat: number | null; lon: number | null };
+  | { type: "setAdsbRef"; lat: number | null; lon: number | null }
+  /** Toggle AIS mode: retunes to 162 MHz @ 240 kSPS and decodes both channels. */
+  | { type: "setAis"; on: boolean };
 
 // ---------------------------------------------------------------------------
 // Server -> Client (JSON status)
@@ -216,6 +229,29 @@ export interface AircraftReport {
   heading?: number; // track, degrees
   vertRate?: number; // ft/min
   rssi?: number; // signal level, dBFS
+  messages: number;
+  seen: number; // seconds since last message
+}
+
+/** One tracked vessel from the AIS decoder. */
+export interface VesselReport {
+  /** 9-digit Maritime Mobile Service Identity. */
+  mmsi: string;
+  name?: string;
+  callsign?: string;
+  /** Human-readable ship type, e.g. "Cargo", "Tanker", "Passenger". */
+  shipType?: string;
+  lat?: number;
+  lon?: number;
+  sog?: number; // speed over ground, knots
+  cog?: number; // course over ground, degrees
+  heading?: number; // true heading, degrees (undefined when not transmitted)
+  navStatus?: string; // e.g. "Under way using engine"
+  /** AIS channel the last message arrived on. */
+  channel?: "A" | "B";
+  rssi?: number; // signal level, dBFS
+  /** True for Class B transponders (smaller craft), false/undefined for Class A. */
+  classB?: boolean;
   messages: number;
   seen: number; // seconds since last message
 }
@@ -255,6 +291,8 @@ export interface RadioState {
   notches: number[];
   /** When true the radio is decoding ADS-B (1090 MHz) instead of audio. */
   adsb: boolean;
+  /** When true the radio is decoding AIS (162 MHz) instead of audio. */
+  ais: boolean;
 }
 
 export type ServerMessage =
@@ -264,6 +302,17 @@ export type ServerMessage =
   | { type: "signal"; channelDb: number; squelchOpen: boolean }
   /** Periodic ADS-B aircraft table snapshot (only while ADS-B is on). */
   | { type: "adsb"; aircraft: AircraftReport[]; messageRate: number }
+  /**
+   * Periodic AIS vessel table snapshot (only while AIS is on). `framesSeen` is
+   * the running count of well-formed bursts the demod has found (valid or not)
+   * — a reception/antenna activity gauge.
+   */
+  | {
+      type: "ais";
+      vessels: VesselReport[];
+      messageRate: number;
+      framesSeen: number;
+    }
   /** Scanner status, or null when scanning stops. */
   | { type: "scan"; status: ScanStatus | null }
   | { type: "error"; message: string };
@@ -397,4 +446,5 @@ export const DEFAULT_STATE: RadioState = {
   agc: "off",
   notches: [],
   adsb: false,
+  ais: false,
 };

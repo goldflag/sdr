@@ -10,19 +10,38 @@ import { Scanner } from "@/components/Scanner";
 import { useBookmarks } from "@/lib/bookmarks";
 import { Vfo } from "@/components/Vfo";
 import { AdsbPanel } from "@/components/AdsbPanel";
+import { AisPanel } from "@/components/AisPanel";
 import {
   SpectrumDisplay,
   DEFAULT_DISPLAY,
   type DisplaySettings,
 } from "@/components/SpectrumDisplay";
-import { Activity, AlertTriangle, AudioWaveform, Plane } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Slider } from "@/components/ui/slider";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
+  Activity,
+  AlertTriangle,
+  AudioWaveform,
+  Plane,
+  Ship,
+  Volume1,
+  Volume2,
+  VolumeX,
+} from "lucide-react";
 
-// OpenLayers is heavy; only load the map when the ADS-B view is opened.
+// OpenLayers is heavy; only load the map when the tracking view is opened.
 const AdsbMap = lazy(() =>
   import("@/components/AdsbMap").then((m) => ({ default: m.AdsbMap })),
 );
 
-type View = "spectrum" | "adsb";
+type View = "spectrum" | "track";
+/** Which decoder feeds the tracking map (the dongle does one band at a time). */
+type TrackSource = "adsb" | "ais";
 
 export default function App() {
   const radio = useRadio();
@@ -30,7 +49,9 @@ export default function App() {
   if (!playerRef.current) playerRef.current = new PcmPlayer();
   const [audioRunning, setAudioRunning] = useState(false);
   const [volume, setVolume] = useState(0.7);
+  const [muted, setMuted] = useState(false);
   const [view, setView] = useState<View>("spectrum");
+  const [source, setSource] = useState<TrackSource>("adsb");
   const [selected, setSelected] = useState<string | null>(null);
   const [ref, setRef] = useState<{ lat: number; lon: number } | null>(loadRef);
   const [display, setDisplay] = useState<DisplaySettings>(loadDisplay);
@@ -43,10 +64,29 @@ export default function App() {
     saveDisplay(next);
   };
 
+  // Activate the decoder for a source (the server auto-disables the other one).
+  const activate = (s: TrackSource) => {
+    if (s === "adsb") radio.send({ type: "setAdsb", on: true });
+    else radio.send({ type: "setAis", on: true });
+  };
+
   const switchView = (v: View) => {
     setView(v);
-    if (v !== "adsb") setSelected(null);
-    radio.send({ type: "setAdsb", on: v === "adsb" });
+    if (v === "track") {
+      activate(source);
+    } else {
+      setSelected(null);
+      radio.send({ type: "setAdsb", on: false });
+      radio.send({ type: "setAis", on: false });
+    }
+  };
+
+  // Switch which decoder feeds the map while staying in the tracking view.
+  const switchSource = (s: TrackSource) => {
+    if (s === source) return;
+    setSource(s);
+    setSelected(null);
+    activate(s);
   };
 
   const setReceiverRef = (lat: number | null, lon: number | null) => {
@@ -74,8 +114,24 @@ export default function App() {
 
   const enableAudio = async () => {
     await playerRef.current?.init();
-    playerRef.current?.setVolume(volume);
+    playerRef.current?.setVolume(muted ? 0 : volume);
     setAudioRunning(playerRef.current?.running ?? false);
+  };
+
+  // Dragging the slider sets a level and always unmutes.
+  const changeVolume = (v: number) => {
+    setVolume(v);
+    setMuted(false);
+    playerRef.current?.setVolume(v);
+  };
+
+  // Toggle mute, keeping the slider level so it can be restored.
+  const toggleMute = () => {
+    setMuted((m) => {
+      const next = !m;
+      playerRef.current?.setVolume(next ? 0 : volume);
+      return next;
+    });
   };
 
   return (
@@ -87,12 +143,23 @@ export default function App() {
       )}
 
       <div className="flex min-h-0 flex-1">
-        {/* Control rail — receiver controls, or ADS-B traffic when in map view */}
+        {/* Control rail — receiver controls, or traffic when in the map view */}
         <aside className="scroll-thin w-[320px] shrink-0 overflow-y-auto border-r bg-sidebar">
-          {view === "adsb" ? (
+          {view === "track" && source === "adsb" ? (
             <AdsbPanel
               aircraft={radio.aircraft}
               messageRate={radio.messageRate}
+              selected={selected}
+              onSelect={setSelected}
+              refLat={ref?.lat ?? null}
+              refLon={ref?.lon ?? null}
+              onSetRef={setReceiverRef}
+            />
+          ) : view === "track" && source === "ais" ? (
+            <AisPanel
+              vessels={radio.vessels}
+              messageRate={radio.aisMessageRate}
+              framesSeen={radio.aisFramesSeen}
               selected={selected}
               onSelect={setSelected}
               refLat={ref?.lat ?? null}
@@ -114,13 +181,6 @@ export default function App() {
                 deviceInfo={radio.deviceInfo}
                 signal={radio.signal}
                 send={radio.send}
-                volume={volume}
-                onVolume={(v) => {
-                  setVolume(v);
-                  playerRef.current?.setVolume(v);
-                }}
-                audioRunning={audioRunning}
-                onEnableAudio={enableAudio}
               />
               <SpectrumDisplay display={display} onChange={updateDisplay} />
             </>
@@ -131,10 +191,25 @@ export default function App() {
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center gap-3 border-b px-4 py-2">
             <ViewTabs view={view} onChange={switchView} />
-            {view === "adsb" && (
-              <span className="font-mono text-[11px] text-muted-foreground">
-                {radio.aircraft.length} aircraft · {radio.messageRate} msg/s
-              </span>
+            {view === "track" && (
+              <>
+                <SourceToggle source={source} onChange={switchSource} />
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  {source === "adsb"
+                    ? `${radio.aircraft.length} aircraft · ${radio.messageRate} msg/s`
+                    : `${radio.vessels.length} vessels · ${radio.aisMessageRate} msg/s`}
+                </span>
+              </>
+            )}
+            {view === "spectrum" && (
+              <AudioControl
+                running={audioRunning}
+                volume={volume}
+                muted={muted}
+                onVolume={changeVolume}
+                onToggleMute={toggleMute}
+                onEnable={enableAudio}
+              />
             )}
           </div>
           {view === "spectrum" ? (
@@ -167,7 +242,9 @@ export default function App() {
                 }
               >
                 <AdsbMap
-                  aircraft={radio.aircraft}
+                  key={source}
+                  aircraft={source === "adsb" ? radio.aircraft : []}
+                  vessels={source === "ais" ? radio.vessels : []}
                   selected={selected}
                   onSelect={setSelected}
                   refLat={ref?.lat ?? null}
@@ -179,7 +256,12 @@ export default function App() {
         </main>
       </div>
 
-      <StatusBar state={state} audioRunning={audioRunning} view={view} />
+      <StatusBar
+        state={state}
+        audioRunning={audioRunning}
+        view={view}
+        source={source}
+      />
     </div>
   );
 }
@@ -235,7 +317,7 @@ function ViewTabs({
 }) {
   const tabs: { id: View; label: string; icon: typeof Plane }[] = [
     { id: "spectrum", label: "Spectrum", icon: AudioWaveform },
-    { id: "adsb", label: "ADS-B Map", icon: Plane },
+    { id: "track", label: "ADS-B / AIS", icon: Plane },
   ];
   return (
     <div className="flex items-center gap-0.5 rounded-md bg-muted/50 p-0.5">
@@ -262,26 +344,137 @@ function ViewTabs({
   );
 }
 
+/** Picks which decoder (aircraft / ships) drives the tracking map. */
+function SourceToggle({
+  source,
+  onChange,
+}: {
+  source: TrackSource;
+  onChange: (s: TrackSource) => void;
+}) {
+  const opts: { id: TrackSource; label: string; icon: typeof Plane }[] = [
+    { id: "adsb", label: "Aircraft", icon: Plane },
+    { id: "ais", label: "Ships", icon: Ship },
+  ];
+  return (
+    <div className="flex items-center gap-0.5 rounded-md border bg-muted/30 p-0.5">
+      {opts.map((o) => {
+        const Icon = o.icon;
+        const active = source === o.id;
+        return (
+          <button
+            key={o.id}
+            type="button"
+            onClick={() => onChange(o.id)}
+            className={`flex items-center gap-1.5 rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+              active
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Icon className="size-3" />
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Compact audio output control for the view toolbar. */
+function AudioControl({
+  running,
+  volume,
+  muted,
+  onVolume,
+  onToggleMute,
+  onEnable,
+}: {
+  running: boolean;
+  volume: number;
+  muted: boolean;
+  onVolume: (v: number) => void;
+  onToggleMute: () => void;
+  onEnable: () => void;
+}) {
+  if (!running) {
+    return (
+      <Button
+        onClick={onEnable}
+        size="sm"
+        variant="outline"
+        className="ml-auto"
+      >
+        <Volume2 /> Enable audio
+      </Button>
+    );
+  }
+  const silent = muted || volume === 0;
+  const Icon = silent ? VolumeX : volume < 0.5 ? Volume1 : Volume2;
+  return (
+    <div className="ml-auto flex items-center gap-2">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={onToggleMute}
+            aria-label={muted ? "Unmute" : "Mute"}
+            aria-pressed={muted}
+            className="inline-flex text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none"
+          >
+            <Icon className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{muted ? "Unmute" : "Mute"}</TooltipContent>
+      </Tooltip>
+      <Slider
+        value={[volume]}
+        min={0}
+        max={1}
+        step={0.01}
+        onValueChange={([v]) => onVolume(v ?? 0)}
+        aria-label="Volume"
+        className="w-24"
+      />
+      <span
+        className={`w-9 text-right font-mono text-[11px] tabular-nums ${
+          silent ? "text-muted-foreground" : "text-foreground/70"
+        }`}
+      >
+        {Math.round(volume * 100)}%
+      </span>
+    </div>
+  );
+}
+
 function StatusBar({
   state,
   audioRunning,
   view,
+  source,
 }: {
   state: RadioState;
   audioRunning: boolean;
   view: View;
+  source: TrackSource;
 }) {
+  const isAdsb = view === "track" && source === "adsb";
+  const isAis = view === "track" && source === "ais";
   return (
     <footer className="flex items-center justify-between gap-4 border-t bg-sidebar px-5 py-1.5 font-mono text-[11px] text-muted-foreground">
       <span className="flex items-center gap-1.5">
         <Activity className="size-3 text-primary" />
-        {view === "adsb"
+        {isAdsb
           ? "Decoding Mode S extended squitter at 1090 MHz · markers update live"
-          : "Click to tune · scroll to zoom · drag filter edges · ⌥-click to notch"}
+          : isAis
+            ? "Decoding AIS GMSK on both channels at 162 MHz · markers update live"
+            : "Click to tune · scroll to zoom · drag filter edges · ⌥-click to notch"}
       </span>
       <div className="flex items-center gap-4">
-        {view === "adsb" ? (
+        {isAdsb ? (
           <Stat label="FREQ" value="1090.000M" />
+        ) : isAis ? (
+          <Stat label="FREQ" value="162.000M" />
         ) : (
           <>
             <Stat label="MODE" value={state.mode} />

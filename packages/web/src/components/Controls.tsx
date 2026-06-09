@@ -19,24 +19,19 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Button } from "@/components/ui/button";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type { SignalState } from "@/lib/ws";
-import { Volume2, AlertTriangle, ChevronRight, Info } from "lucide-react";
+import { AlertTriangle, ChevronRight, Info } from "lucide-react";
 
 interface Props {
   state: RadioState;
   deviceInfo: DeviceInfo | null;
   signal: SignalState | null;
   send: (msg: ClientMessage) => void;
-  volume: number;
-  onVolume: (v: number) => void;
-  audioRunning: boolean;
-  onEnableAudio: () => void;
 }
 
 const BW_RANGE: Record<Mode, [number, number, number]> = {
@@ -209,24 +204,6 @@ export function Controls(p: Props) {
             </SelectContent>
           </Select>
         </Field>
-      </Section>
-
-      <Section title="Audio">
-        {p.audioRunning ? (
-          <Field label="Volume" value={`${Math.round(p.volume * 100)}%`}>
-            <Slider
-              value={[p.volume]}
-              min={0}
-              max={1}
-              step={0.01}
-              onValueChange={([v]) => p.onVolume(v ?? 0)}
-            />
-          </Field>
-        ) : (
-          <Button onClick={p.onEnableAudio} className="w-full" size="sm">
-            <Volume2 /> Enable audio output
-          </Button>
-        )}
       </Section>
 
       <Section title="Gain">

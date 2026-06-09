@@ -11,6 +11,8 @@ import {
   type ServerMessage,
   ADSB_FREQ_HZ,
   ADSB_SAMPLE_RATE,
+  AIS_FREQ_HZ,
+  AIS_SAMPLE_RATE,
   AUDIO_RATE,
   DEFAULT_BANDWIDTH,
   DEFAULT_STATE,
@@ -26,6 +28,7 @@ import { RtlTcpClient } from "./rtltcp/client";
 import { SpectrumAnalyzer } from "./dsp/fft";
 import { Demodulator } from "./dsp/demod";
 import { AdsbReceiver } from "./dsp/adsb";
+import { AisReceiver } from "./dsp/ais";
 import { Nco } from "./dsp/nco";
 import { floatToInt16 } from "./dsp/resample";
 import { Scanner } from "./scanner";
@@ -33,6 +36,7 @@ import { Scanner } from "./scanner";
 const FFT_INTERVAL_MS = 50; // ~20 fps
 const FFT_SIZE = 2048;
 const ADSB_BROADCAST_MS = 1000; // aircraft table refresh rate
+const AIS_BROADCAST_MS = 1000; // vessel table refresh rate
 
 export interface RadioSinks {
   json: (msg: ServerMessage) => void;
@@ -54,6 +58,7 @@ export class Radio {
   private spectrum = new SpectrumAnalyzer(FFT_SIZE);
   private demod = new Demodulator();
   private adsb = new AdsbReceiver();
+  private ais = new AisReceiver();
   private scanner = new Scanner({
     tune: (e) => this.scanTune(e),
     status: (s) => {
@@ -69,8 +74,11 @@ export class Radio {
   private lastSignal = 0;
   private lastAdsb = 0;
   private lastAdsbCount = 0;
-  // Receiver settings saved when entering ADS-B, restored on exit.
-  private preAdsb: Pick<
+  private lastAis = 0;
+  private lastAisCount = 0;
+  // Receiver settings saved when entering a decode mode (ADS-B / AIS), restored
+  // on exit.
+  private preDecode: Pick<
     RadioState,
     "centerHz" | "sampleRate" | "gainMode" | "gainDb" | "directSampling"
   > | null = null;
@@ -259,8 +267,13 @@ export class Radio {
       case "setAdsbRef":
         this.adsb.setRef(msg.lat, msg.lon);
         break;
+      case "setAis":
+        if (msg.on) this.enterAis();
+        else this.exitAis();
+        break;
       case "scanStart":
-        if (!this.state.adsb) this.scanner.start(msg.config, Date.now());
+        if (!this.state.adsb && !this.state.ais)
+          this.scanner.start(msg.config, Date.now());
         break;
       case "scanStop":
         this.scanner.stop();
@@ -272,28 +285,51 @@ export class Radio {
     this.broadcastState();
   }
 
-  /** Retune to 1090 MHz @ 2 MSPS with max gain and start Mode S decoding. */
-  private enterAdsb() {
-    if (this.state.adsb) return;
-    this.scanner.stop();
+  /** Save the current receiver tuning so a decode mode can be undone on exit. */
+  private saveDecodeState() {
     const s = this.state;
-    this.preAdsb = {
+    this.preDecode = {
       centerHz: s.centerHz,
       sampleRate: s.sampleRate,
       gainMode: s.gainMode,
       gainDb: s.gainDb,
       directSampling: s.directSampling,
     };
+  }
+
+  /** Restore the receiver tuning saved before entering a decode mode. */
+  private restoreDecodeState() {
+    const s = this.state;
+    if (!this.preDecode) return;
+    s.centerHz = this.preDecode.centerHz;
+    s.sampleRate = this.preDecode.sampleRate;
+    s.gainMode = this.preDecode.gainMode;
+    s.gainDb = this.preDecode.gainDb;
+    s.directSampling = this.preDecode.directSampling;
+    this.preDecode = null;
+  }
+
+  /** Tune to max gain (digital decode modes are reception-limited). */
+  private maxGain() {
+    const gains = this.deviceInfo?.gains ?? [];
+    if (gains.length > 0) {
+      this.state.gainMode = "manual";
+      this.state.gainDb = gains[gains.length - 1]!;
+    }
+  }
+
+  /** Retune to 1090 MHz @ 2 MSPS with max gain and start Mode S decoding. */
+  private enterAdsb() {
+    if (this.state.adsb) return;
+    this.exitAis(); // the dongle can only listen on one band at a time
+    this.scanner.stop();
+    this.saveDecodeState();
+    const s = this.state;
     s.adsb = true;
     s.centerHz = ADSB_FREQ_HZ;
     s.sampleRate = ADSB_SAMPLE_RATE;
     s.directSampling = DIRECT_SAMPLING.OFF;
-    // ADS-B decodes best near max gain.
-    const gains = this.deviceInfo?.gains ?? [];
-    if (gains.length > 0) {
-      s.gainMode = "manual";
-      s.gainDb = gains[gains.length - 1]!;
-    }
+    this.maxGain();
     this.adsb.reset();
     this.lastAdsb = 0;
     this.lastAdsbCount = 0;
@@ -303,16 +339,34 @@ export class Radio {
   /** Leave ADS-B and restore the previous receiver settings. */
   private exitAdsb() {
     if (!this.state.adsb) return;
+    this.state.adsb = false;
+    this.restoreDecodeState();
+    this.applyReceiver();
+  }
+
+  /** Retune to 162 MHz @ 240 kSPS with max gain and start AIS decoding. */
+  private enterAis() {
+    if (this.state.ais) return;
+    this.exitAdsb(); // mutually exclusive with ADS-B
+    this.scanner.stop();
+    this.saveDecodeState();
     const s = this.state;
-    s.adsb = false;
-    if (this.preAdsb) {
-      s.centerHz = this.preAdsb.centerHz;
-      s.sampleRate = this.preAdsb.sampleRate;
-      s.gainMode = this.preAdsb.gainMode;
-      s.gainDb = this.preAdsb.gainDb;
-      s.directSampling = this.preAdsb.directSampling;
-      this.preAdsb = null;
-    }
+    s.ais = true;
+    s.centerHz = AIS_FREQ_HZ;
+    s.sampleRate = AIS_SAMPLE_RATE;
+    s.directSampling = DIRECT_SAMPLING.OFF;
+    this.maxGain();
+    this.ais.reset();
+    this.lastAis = 0;
+    this.lastAisCount = 0;
+    this.applyReceiver();
+  }
+
+  /** Leave AIS and restore the previous receiver settings. */
+  private exitAis() {
+    if (!this.state.ais) return;
+    this.state.ais = false;
+    this.restoreDecodeState();
     this.applyReceiver();
   }
 
@@ -414,6 +468,26 @@ export class Radio {
           type: "adsb",
           aircraft: this.adsb.snapshot(now),
           messageRate: Math.round(rate),
+        });
+      }
+      return;
+    }
+
+    if (this.state.ais) {
+      this.ais.process(iq);
+      const now = Date.now();
+      if (now - this.lastAis >= AIS_BROADCAST_MS) {
+        const total = this.ais.totalMessages;
+        const rate = this.lastAis
+          ? (total - this.lastAisCount) / ((now - this.lastAis) / 1000)
+          : 0;
+        this.lastAis = now;
+        this.lastAisCount = total;
+        this.sinks.json({
+          type: "ais",
+          vessels: this.ais.snapshot(now),
+          messageRate: Math.round(rate),
+          framesSeen: this.ais.candidateFrames,
         });
       }
       return;
