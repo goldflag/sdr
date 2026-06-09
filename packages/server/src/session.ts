@@ -18,15 +18,12 @@ import {
   APRS_IF_OFFSET,
   APRS_SAMPLE_RATE,
   ISM_SAMPLE_RATE,
-  APT_SAMPLE_RATE,
-  APT_IF_OFFSET,
   AUDIO_RATE,
   DEFAULT_BANDWIDTH,
   DEFAULT_STATE,
   DIRECT_SAMPLING,
   TUNER_NAME,
   defaultEdges,
-  encodeAptLine,
   encodeAudioFrame,
   encodeFftFrame,
   gainStepsDb,
@@ -39,7 +36,6 @@ import { AdsbReceiver } from "./dsp/adsb";
 import { AisReceiver } from "./dsp/ais";
 import { AprsReceiver } from "./dsp/aprs";
 import { IsmReceiver } from "./dsp/ism";
-import { AptReceiver } from "./dsp/apt";
 import { Nco } from "./dsp/nco";
 import { floatToInt16 } from "./dsp/resample";
 import { Scanner } from "./scanner";
@@ -50,7 +46,6 @@ const ADSB_BROADCAST_MS = 1000; // aircraft table refresh rate
 const AIS_BROADCAST_MS = 1000; // vessel table refresh rate
 const APRS_BROADCAST_MS = 1000; // station table refresh rate
 const ISM_BROADCAST_MS = 500; // ISM event log refresh rate
-const APT_BROADCAST_MS = 1000; // APT status (lines/sync/level) refresh rate
 // When several map layers are enabled, the dongle round-robins across them.
 const LAYER_DWELL_MS = 5000; // time spent on each band before rotating
 const LAYER_SETTLE_MS = 300; // ignore IQ right after a retune (tuner transient)
@@ -79,10 +74,6 @@ export class Radio {
   private ais = new AisReceiver();
   private aprs = new AprsReceiver();
   private ism = new IsmReceiver();
-  // APT emits each rendered scanline straight out as a binary frame.
-  private apt = new AptReceiver((line) =>
-    this.sinks.binary(encodeAptLine(line.lineNo, line.pixels)),
-  );
   private scanner = new Scanner({
     tune: (e) => this.scanTune(e),
     status: (s) => {
@@ -103,7 +94,6 @@ export class Radio {
   private lastAprs = 0;
   private lastAprsCount = 0;
   private lastIsm = 0;
-  private lastApt = 0;
   // Round-robin scheduler for the map decode layers.
   private mapActive = false;
   private mapTimer: ReturnType<typeof setInterval> | null = null;
@@ -318,25 +308,12 @@ export class Radio {
           this.applyReceiver();
         }
         break;
-      case "setApt":
-        if (msg.on) this.enterApt();
-        else this.exitApt();
-        break;
-      case "setAptSat":
-        this.state.aptFreqHz = msg.hz;
-        if (this.state.apt) {
-          this.state.centerHz = msg.hz - APT_IF_OFFSET;
-          this.apt.reset(); // restart the image on the new bird
-          this.applyReceiver();
-        }
-        break;
       case "scanStart":
         if (
           !this.state.adsb &&
           !this.state.ais &&
           !this.state.aprs &&
-          !this.state.ism &&
-          !this.state.apt
+          !this.state.ism
         )
           this.scanner.start(msg.config, Date.now());
         break;
@@ -388,10 +365,7 @@ export class Radio {
   /** Enable/disable a map layer, then reconcile the round-robin schedule. */
   private setLayer(layer: MapLayer, on: boolean) {
     if (this.state[layer] === on) return;
-    if (on) {
-      this.exitIsm(); // map layers, ISM and APT all need the one dongle
-      this.exitApt();
-    }
+    if (on) this.exitIsm(); // map layers and ISM both need the dongle
     this.state[layer] = on;
     if (on) this.resetLayer(layer); // clear stale targets from a prior session
     this.reconcileLayers();
@@ -496,7 +470,6 @@ export class Radio {
   private enterIsm() {
     if (this.state.ism) return;
     this.disableAllLayers(); // release the dongle from map mode
-    this.exitApt();
     this.scanner.stop();
     this.saveDecodeState();
     const s = this.state;
@@ -514,33 +487,6 @@ export class Radio {
   private exitIsm() {
     if (!this.state.ism) return;
     this.state.ism = false;
-    this.restoreDecodeState();
-    this.applyReceiver();
-  }
-
-  /** Retune to the selected NOAA bird @ 249.6 kSPS and start APT image decode. */
-  private enterApt() {
-    if (this.state.apt) return;
-    this.disableAllLayers(); // release the dongle from map mode
-    this.exitIsm();
-    this.scanner.stop();
-    this.saveDecodeState();
-    const s = this.state;
-    s.apt = true;
-    // Tune below the carrier so it clears the centre DC spike (NCO mixes it back).
-    s.centerHz = s.aptFreqHz - APT_IF_OFFSET;
-    s.sampleRate = APT_SAMPLE_RATE;
-    s.directSampling = DIRECT_SAMPLING.OFF;
-    this.maxGain();
-    this.apt.reset();
-    this.lastApt = 0;
-    this.applyReceiver();
-  }
-
-  /** Leave APT and restore the previous receiver settings. */
-  private exitApt() {
-    if (!this.state.apt) return;
-    this.state.apt = false;
     this.restoreDecodeState();
     this.applyReceiver();
   }
@@ -698,22 +644,6 @@ export class Radio {
           decoded: this.ism.totalDecoded,
           noiseDb: this.ism.noiseDb,
           freqHz: this.state.centerHz,
-        });
-      }
-      return;
-    }
-
-    if (this.state.apt) {
-      this.apt.process(iq); // emits image lines via its callback (binary frames)
-      const now = Date.now();
-      if (now - this.lastApt >= APT_BROADCAST_MS) {
-        this.lastApt = now;
-        this.sinks.json({
-          type: "apt",
-          lines: this.apt.lines,
-          sync: this.apt.syncLevel,
-          levelDb: this.apt.levelDb,
-          freqHz: this.state.aptFreqHz,
         });
       }
       return;

@@ -60,7 +60,7 @@ export function icaoInfo(hex: string): IcaoInfo {
 }
 
 /** 2-letter country code -> regional-indicator flag emoji. */
-function iso2ToFlag(iso2: string): string {
+export function iso2ToFlag(iso2: string): string {
   return String.fromCodePoint(
     ...[...iso2.toUpperCase()].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65),
   );

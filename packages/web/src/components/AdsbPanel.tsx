@@ -7,7 +7,8 @@ import type { AircraftReport } from "@sdr/shared";
 import { Plane, Crosshair, X } from "lucide-react";
 import { Section } from "@/components/Controls";
 import { Button } from "@/components/ui/button";
-import { icaoInfo } from "@/lib/icao";
+import { icaoInfo, categoryInfo, iso2ToFlag } from "@/lib/icao";
+import { useAircraftDb } from "@/lib/aircraft-db";
 import { distanceNm } from "@/lib/geo";
 
 interface Props {
@@ -129,6 +130,165 @@ export function AdsbPanel(p: Props) {
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Full readout for one selected aircraft: decoded telemetry (always present)
+ * plus airframe / operator / route enrichment fetched from adsbdb when online.
+ * Self-contained card; the caller positions it (sidebar row or map overlay).
+ */
+export function AircraftDetail({
+  report,
+  dist,
+  onClose,
+}: {
+  report: AircraftReport;
+  dist: number | null;
+  onClose: () => void;
+}) {
+  const [photoOk, setPhotoOk] = useState(true);
+  const info = icaoInfo(report.icao);
+  const cat = categoryInfo(report.category);
+  const { aircraft: db, route, loading } = useAircraftDb(
+    report.icao,
+    report.callsign,
+  );
+
+  const title =
+    report.callsign?.trim() ||
+    db?.registration ||
+    info.registration ||
+    report.icao.toUpperCase();
+  const reg = db?.registration || info.registration;
+  const country = db?.countryName || info.country;
+  const flag =
+    info.flag || (db?.countryIso ? iso2ToFlag(db.countryIso) : undefined);
+  const typeLine = [db?.manufacturer, db?.type].filter(Boolean).join(" ");
+  const sub = [reg, report.icao.toUpperCase(), country].filter(Boolean);
+
+  const fmtRate =
+    report.vertRate != null
+      ? `${report.vertRate > 0 ? "+" : ""}${report.vertRate.toLocaleString()} fpm`
+      : "—";
+
+  return (
+    <div className="scroll-thin max-h-full w-72 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-lg border bg-background/95 px-3 py-3 shadow-xl backdrop-blur-sm">
+      <div className="flex items-start gap-2.5">
+        {db?.photoThumb && photoOk && (
+          <img
+            src={db.photoThumb}
+            alt={typeLine || "aircraft"}
+            loading="lazy"
+            onError={() => setPhotoOk(false)}
+            className="h-12 w-16 shrink-0 rounded-sm border object-cover"
+          />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            {flag && <span className="shrink-0">{flag}</span>}
+            <span className="truncate font-mono text-sm font-semibold text-foreground">
+              {title}
+            </span>
+            {report.lat != null && (
+              <span
+                className="size-1.5 shrink-0 rounded-full bg-primary"
+                title="position decoded"
+              />
+            )}
+          </div>
+          <p className="truncate font-mono text-[11px] text-muted-foreground">
+            {sub.join(" · ")}
+          </p>
+        </div>
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          onClick={onClose}
+          aria-label="Close aircraft detail"
+        >
+          <X />
+        </Button>
+      </div>
+
+      {(typeLine || db?.owner || route?.origin || loading) && (
+        <div className="mt-2.5 flex flex-col gap-1 text-[11px]">
+          {typeLine && (
+            <DetailLine
+              label="Type"
+              value={db?.icaoType ? `${typeLine} (${db.icaoType})` : typeLine}
+            />
+          )}
+          {db?.owner && <DetailLine label="Operator" value={db.owner} />}
+          {route?.airline && <DetailLine label="Airline" value={route.airline} />}
+          {route?.origin && route?.destination && (
+            <DetailLine
+              label="Route"
+              value={`${route.origin.iata || route.origin.icao} ${route.origin.municipality} → ${route.destination.iata || route.destination.icao} ${route.destination.municipality}`}
+            />
+          )}
+          {loading && !db && (
+            <p className="text-muted-foreground/70">Looking up airframe…</p>
+          )}
+        </div>
+      )}
+      {!loading && !db && (
+        <p className="mt-2 text-[11px] text-muted-foreground/70">
+          Not in the airframe database.
+        </p>
+      )}
+
+      <div className="mt-2.5 grid grid-cols-2 gap-x-4 gap-y-1 border-t pt-2.5 font-mono text-[11px]">
+        <Metric
+          label="ALT"
+          value={
+            report.altitude != null
+              ? `${report.altitude.toLocaleString()} ft`
+              : "—"
+          }
+        />
+        <Metric
+          label="SPD"
+          value={report.speed != null ? `${report.speed} kt` : "—"}
+        />
+        <Metric
+          label="HDG"
+          value={report.heading != null ? `${Math.round(report.heading)}°` : "—"}
+        />
+        <Metric label="V/S" value={fmtRate} />
+        <Metric
+          label="DIST"
+          value={dist != null ? `${dist.toFixed(1)} NM` : "—"}
+        />
+        <Metric
+          label="RSSI"
+          value={report.rssi != null ? `${report.rssi.toFixed(0)} dBFS` : "—"}
+        />
+        <Metric label="CAT" value={cat.label} />
+        <Metric
+          label="MSGS"
+          value={`${report.messages} · ${report.seen.toFixed(0)}s`}
+        />
+      </div>
+    </div>
+  );
+}
+
+function DetailLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex gap-2">
+      <span className="w-14 shrink-0 text-muted-foreground">{label}</span>
+      <span className="min-w-0 flex-1 text-foreground/90">{value}</span>
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-2">
+      <span className="text-muted-foreground/60">{label}</span>
+      <span className="truncate tabular-nums text-foreground/90">{value}</span>
     </div>
   );
 }

@@ -95,25 +95,6 @@ export const ISM_BANDS = [
   { hz: 915_000_000, label: "915" },
 ] as const;
 
-/**
- * NOAA weather-satellite APT (Automatic Picture Transmission). The three active
- * birds broadcast a continuous analog image around 137 MHz: a 2400 Hz AM video
- * subcarrier inside a ~34 kHz-wide FM channel, scanned at 2 lines/sec (4160
- * words/sec → 2080 pixels per line). We capture 249.6 kSPS — a tidy 6×10×4160 —
- * so the chain decimates to exactly 4160 pixels/sec with no fractional resampling.
- */
-export const APT_SAMPLE_RATE = 249_600;
-/** Tune this far below the satellite carrier so it clears the RTL DC spike. */
-export const APT_IF_OFFSET = 50_000;
-/** Pixels per APT scanline (Sync A + space + video A + telemetry + B half). */
-export const APT_PIXELS = 2080;
-/** Active NOAA APT satellites and their downlink frequencies (Hz). */
-export const NOAA_SATS = [
-  { hz: 137_620_000, label: "NOAA-15" },
-  { hz: 137_912_500, label: "NOAA-18" },
-  { hz: 137_100_000, label: "NOAA-19" },
-] as const;
-
 /** Direct-sampling mode values passed straight to rtl_tcp / librtlsdr. */
 export const DIRECT_SAMPLING = {
   OFF: 0,
@@ -264,11 +245,7 @@ export type ClientMessage =
   /** Toggle ISM (rtl_433-style) OOK decode at the current ISM frequency. */
   | { type: "setIsm"; on: boolean }
   /** Set the ISM centre frequency in Hz (315 / 434 / 868 / 915 MHz, …). */
-  | { type: "setIsmFreq"; hz: number }
-  /** Toggle NOAA APT weather-satellite image decode (~137 MHz NBFM). */
-  | { type: "setApt"; on: boolean }
-  /** Select the NOAA satellite downlink frequency in Hz (NOAA-15/18/19). */
-  | { type: "setAptSat"; hz: number };
+  | { type: "setIsmFreq"; hz: number };
 
 // ---------------------------------------------------------------------------
 // Server -> Client (JSON status)
@@ -414,10 +391,6 @@ export interface RadioState {
   ism: boolean;
   /** Selected ISM centre frequency in Hz. */
   ismFreqHz: number;
-  /** When true the radio is decoding a NOAA APT weather-satellite image. */
-  apt: boolean;
-  /** Selected NOAA satellite downlink frequency in Hz. */
-  aptFreqHz: number;
 }
 
 export type ServerMessage =
@@ -462,19 +435,6 @@ export type ServerMessage =
       noiseDb: number;
       freqHz: number;
     }
-  /**
-   * Periodic NOAA APT decode status (only while APT is on). `lines` is the count
-   * of scanlines rendered so far this pass, `sync` the recent line-sync lock
-   * quality (0..1 — high means a satellite is locked), `levelDb` the channel
-   * signal level. The image rows themselves arrive as APT_LINE binary frames.
-   */
-  | {
-      type: "apt";
-      lines: number;
-      sync: number;
-      levelDb: number;
-      freqHz: number;
-    }
   /** Scanner status, or null when scanning stops. */
   | { type: "scan"; status: ScanStatus | null }
   | { type: "error"; message: string };
@@ -486,7 +446,6 @@ export type ServerMessage =
 export enum BinaryFrameType {
   FFT = 0x01,
   AUDIO = 0x02,
-  APT_LINE = 0x03,
 }
 
 // FFT frame layout (little-endian). The header is padded to 24 bytes so the
@@ -564,38 +523,6 @@ export function decodeAudioFrame(buf: ArrayBuffer): AudioFrame {
   return { sampleRate, pcm };
 }
 
-// APT image-line frame layout (little-endian). One fully sync-aligned NOAA APT
-// scanline as 8-bit grayscale:
-//   u8  type (=3)
-//   u8  _pad
-//   u32 lineNo       monotonic scanline index (resets to 0 on a new pass)
-//   u16 width        pixels (== APT_PIXELS)
-//   u8[width]        grayscale pixels, left -> right
-const APT_HEADER_BYTES = 1 + 1 + 4 + 2;
-
-export function encodeAptLine(lineNo: number, pixels: Uint8Array): ArrayBuffer {
-  const buf = new ArrayBuffer(APT_HEADER_BYTES + pixels.length);
-  const dv = new DataView(buf);
-  dv.setUint8(0, BinaryFrameType.APT_LINE);
-  dv.setUint32(2, lineNo, true);
-  dv.setUint16(6, pixels.length, true);
-  new Uint8Array(buf, APT_HEADER_BYTES).set(pixels);
-  return buf;
-}
-
-export interface AptLineFrame {
-  lineNo: number;
-  pixels: Uint8Array;
-}
-
-export function decodeAptLine(buf: ArrayBuffer): AptLineFrame {
-  const dv = new DataView(buf);
-  const lineNo = dv.getUint32(2, true);
-  const width = dv.getUint16(6, true);
-  const pixels = new Uint8Array(buf.slice(APT_HEADER_BYTES)).subarray(0, width);
-  return { lineNo, pixels };
-}
-
 /** Reads the leading tag byte of a binary frame. */
 export function frameType(buf: ArrayBuffer): BinaryFrameType {
   return new DataView(buf).getUint8(0);
@@ -646,6 +573,4 @@ export const DEFAULT_STATE: RadioState = {
   activeLayer: null,
   ism: false,
   ismFreqHz: ISM_FREQ_HZ,
-  apt: false,
-  aptFreqHz: 137_100_000, // NOAA-19
 };

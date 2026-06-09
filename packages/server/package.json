@@ -11,8 +11,7 @@
     "test:adsb": "bun run src/dsp/adsb-selftest.ts",
     "test:ais": "bun run src/dsp/ais-selftest.ts",
     "test:aprs": "bun run src/dsp/aprs-selftest.ts",
-    "test:ism": "bun run src/dsp/ism-selftest.ts",
-    "test:apt": "bun run src/dsp/apt-selftest.ts"
+    "test:ism": "bun run src/dsp/ism-selftest.ts"
   },
   "dependencies": {
     "@sdr/shared": "workspace:*",

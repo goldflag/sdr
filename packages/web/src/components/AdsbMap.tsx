@@ -21,7 +21,7 @@ import Feature from "ol/Feature";
 import Overlay from "ol/Overlay";
 import Point from "ol/geom/Point";
 import LineString from "ol/geom/LineString";
-import Polygon, { circular } from "ol/geom/Polygon";
+import { circular } from "ol/geom/Polygon";
 import { createEmpty, extend, isEmpty } from "ol/extent";
 import { fromLonLat, toLonLat } from "ol/proj";
 import {
@@ -73,7 +73,6 @@ interface Props {
 
 const MAX_TRAIL = 60; // points kept per aircraft trail
 const STALE_S = 60;
-const COVERAGE_BUCKETS = 72; // 5-degree max-range bins
 
 type BasemapId = "dark" | "light" | "satellite" | "terrain" | "minimal";
 type LabelMode = "none" | "selected" | "id" | "idAlt" | "idSpeed";
@@ -84,7 +83,6 @@ interface MapSettings {
   trails: boolean;
   rangeRings: boolean;
   receiver: boolean;
-  coverage: boolean;
   legend: boolean;
   readouts: boolean;
   ageFade: boolean;
@@ -150,7 +148,6 @@ const DEFAULT_MAP_SETTINGS: MapSettings = {
   trails: true,
   rangeRings: true,
   receiver: true,
-  coverage: true,
   legend: true,
   readouts: true,
   ageFade: true,
@@ -409,59 +406,6 @@ function opacityForAge(seen: number, floor: number, ageFade: boolean): number {
   return ageFade ? Math.max(floor, 1 - seen / STALE_S) : 1;
 }
 
-function destinationPoint(
-  lat: number,
-  lon: number,
-  bearingDeg: number,
-  distanceNmValue: number,
-): [number, number] {
-  const radiusNm = 3440.065;
-  const angular = distanceNmValue / radiusNm;
-  const brg = (bearingDeg * Math.PI) / 180;
-  const lat1 = (lat * Math.PI) / 180;
-  const lon1 = (lon * Math.PI) / 180;
-  const lat2 = Math.asin(
-    Math.sin(lat1) * Math.cos(angular) +
-      Math.cos(lat1) * Math.sin(angular) * Math.cos(brg),
-  );
-  const lon2 =
-    lon1 +
-    Math.atan2(
-      Math.sin(brg) * Math.sin(angular) * Math.cos(lat1),
-      Math.cos(angular) - Math.sin(lat1) * Math.sin(lat2),
-    );
-  return [
-    (((lon2 * 180) / Math.PI + 540) % 360) - 180,
-    (lat2 * 180) / Math.PI,
-  ];
-}
-
-function coverageFeature(
-  bins: number[],
-  refLat: number,
-  refLon: number,
-): Feature<Polygon> | null {
-  const nonZero = bins.filter((v) => v > 0).length;
-  if (nonZero < 3) return null;
-  const coords: number[][] = [];
-  for (let i = 0; i < bins.length; i++) {
-    const nm = bins[i] ?? 0;
-    const bearingDeg = (i / bins.length) * 360;
-    const lonLat =
-      nm > 0 ? destinationPoint(refLat, refLon, bearingDeg, nm) : [refLon, refLat];
-    coords.push(fromLonLat(lonLat));
-  }
-  coords.push(coords[0]!);
-  const f = new Feature(new Polygon([coords]));
-  f.setStyle(
-    new Style({
-      fill: new Fill({ color: "rgba(96,165,250,0.12)" }),
-      stroke: new Stroke({ color: "rgba(125,180,235,0.55)", width: 1.5 }),
-    }),
-  );
-  return f;
-}
-
 export function AdsbMap({
   aircraft = [],
   vessels = [],
@@ -479,7 +423,6 @@ export function AdsbMap({
   const planeSrc = useRef<VectorSource | null>(null);
   const trailSrc = useRef<VectorSource | null>(null);
   const rangeSrc = useRef<VectorSource | null>(null);
-  const coverageSrc = useRef<VectorSource | null>(null);
   const shipSrc = useRef<VectorSource | null>(null);
   const shipTrailSrc = useRef<VectorSource | null>(null);
   const stationSrc = useRef<VectorSource | null>(null);
@@ -497,8 +440,6 @@ export function AdsbMap({
   const stationFeats = useRef(new Map<string, Feature>());
   const stationTrailFeats = useRef(new Map<string, Feature>());
   const stationTrails = useRef(new Map<string, number[][]>());
-  const coverageBins = useRef<number[]>(Array(COVERAGE_BUCKETS).fill(0));
-  const coverageRefKey = useRef<string | null>(null);
   const didFit = useRef(false);
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
@@ -546,7 +487,6 @@ export function AdsbMap({
     const planes = new VectorSource();
     const trailV = new VectorSource();
     const range = new VectorSource();
-    const coverage = new VectorSource();
     const ships = new VectorSource();
     const shipTrailV = new VectorSource();
     const stns = new VectorSource();
@@ -554,7 +494,6 @@ export function AdsbMap({
     planeSrc.current = planes;
     trailSrc.current = trailV;
     rangeSrc.current = range;
-    coverageSrc.current = coverage;
     shipSrc.current = ships;
     shipTrailSrc.current = shipTrailV;
     stationSrc.current = stns;
@@ -589,7 +528,6 @@ export function AdsbMap({
       target: elRef.current,
       layers: [
         ...baseLayers,
-        new VectorLayer({ source: coverage }),
         new VectorLayer({ source: range }),
         trailVLayer,
         shipTrailVLayer,
@@ -770,31 +708,6 @@ export function AdsbMap({
     );
     src.addFeature(me);
   }, [refLat, refLon, settings.rangeRings, settings.receiver]);
-
-  // Session coverage: max aircraft range per bearing bin from the receiver.
-  useEffect(() => {
-    const src = coverageSrc.current;
-    if (!src) return;
-    src.clear();
-    const refKey =
-      refLat != null && refLon != null
-        ? `${refLat.toFixed(5)},${refLon.toFixed(5)}`
-        : null;
-    if (coverageRefKey.current !== refKey) {
-      coverageBins.current = Array(COVERAGE_BUCKETS).fill(0);
-      coverageRefKey.current = refKey;
-    }
-    if (!settings.coverage || refLat == null || refLon == null) return;
-    for (const a of aircraft) {
-      if (a.lat == null || a.lon == null) continue;
-      const dist = distanceNm(refLat, refLon, a.lat, a.lon);
-      const brg = bearing(refLat, refLon, a.lat, a.lon);
-      const bin = Math.floor((brg / 360) * COVERAGE_BUCKETS) % COVERAGE_BUCKETS;
-      coverageBins.current[bin] = Math.max(coverageBins.current[bin] ?? 0, dist);
-    }
-    const f = coverageFeature(coverageBins.current, refLat, refLon);
-    if (f) src.addFeature(f);
-  }, [aircraft, refLat, refLon, settings.coverage]);
 
   // Sync aircraft markers + trails with the latest snapshot.
   useEffect(() => {
@@ -1387,11 +1300,6 @@ function MapSettingsPanel({
           onCheckedChange={(receiver) => onChange({ receiver })}
         />
         <MapSwitch
-          label="Coverage"
-          checked={settings.coverage}
-          onCheckedChange={(coverage) => onChange({ coverage })}
-        />
-        <MapSwitch
           label="Legend"
           checked={settings.legend}
           onCheckedChange={(legend) => onChange({ legend })}
@@ -1446,10 +1354,6 @@ function MapLegend() {
         <LegendChip color="#22d3ee" label="ADS-B" />
         <LegendChip color="#2dd4bf" label="AIS" />
         <LegendChip color="#a78bfa" label="APRS" />
-      </div>
-      <div className="mt-1 flex items-center gap-1 text-[9px]">
-        <span className="h-2 w-5 rounded-sm bg-primary/25 ring-1 ring-primary/50" />
-        <span>coverage</span>
       </div>
     </div>
   );
