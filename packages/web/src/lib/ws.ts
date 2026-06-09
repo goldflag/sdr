@@ -9,9 +9,11 @@ import {
   type ClientMessage,
   type DeviceInfo,
   type FftFrame,
+  type IsmEvent,
   type RadioState,
   type ScanStatus,
   type ServerMessage,
+  type StationReport,
   type VesselReport,
   BinaryFrameType,
   decodeAudioFrame,
@@ -27,6 +29,23 @@ export interface SignalState {
   squelchOpen: boolean;
 }
 
+export interface IsmStats {
+  bursts: number;
+  decoded: number;
+  noiseDb: number;
+  freqHz: number;
+}
+
+const ISM_LOG_MAX = 200;
+
+/** Merge a fresh ISM event batch into the running log, keyed by stable id. */
+function mergeIsm(prev: IsmEvent[], batch: IsmEvent[]): IsmEvent[] {
+  if (batch.length === 0) return prev;
+  const byId = new Map(prev.map((e) => [e.id, e]));
+  for (const e of batch) byId.set(e.id, e);
+  return [...byId.values()].sort((a, b) => b.id - a.id).slice(0, ISM_LOG_MAX);
+}
+
 export function useRadio() {
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState<RadioState | null>(null);
@@ -37,6 +56,11 @@ export function useRadio() {
   const [vessels, setVessels] = useState<VesselReport[]>([]);
   const [aisMessageRate, setAisMessageRate] = useState(0);
   const [aisFramesSeen, setAisFramesSeen] = useState(0);
+  const [stations, setStations] = useState<StationReport[]>([]);
+  const [aprsMessageRate, setAprsMessageRate] = useState(0);
+  const [aprsFramesSeen, setAprsFramesSeen] = useState(0);
+  const [ismEvents, setIsmEvents] = useState<IsmEvent[]>([]);
+  const [ismStats, setIsmStats] = useState<IsmStats | null>(null);
   const [scan, setScan] = useState<ScanStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -108,6 +132,20 @@ export function useRadio() {
           setAisMessageRate(msg.messageRate);
           setAisFramesSeen(msg.framesSeen);
           break;
+        case "aprs":
+          setStations(msg.stations);
+          setAprsMessageRate(msg.messageRate);
+          setAprsFramesSeen(msg.framesSeen);
+          break;
+        case "ism":
+          setIsmStats({
+            bursts: msg.bursts,
+            decoded: msg.decoded,
+            noiseDb: msg.noiseDb,
+            freqHz: msg.freqHz,
+          });
+          setIsmEvents((prev) => mergeIsm(prev, msg.events));
+          break;
         case "scan":
           setScan(msg.status);
           break;
@@ -155,6 +193,11 @@ export function useRadio() {
     vessels,
     aisMessageRate,
     aisFramesSeen,
+    stations,
+    aprsMessageRate,
+    aprsFramesSeen,
+    ismEvents,
+    ismStats,
     scan,
     error,
     send,

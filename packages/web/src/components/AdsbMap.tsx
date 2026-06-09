@@ -5,7 +5,11 @@
 // selection linking.
 
 import { useEffect, useMemo, useRef } from "react";
-import type { AircraftReport, VesselReport } from "@sdr/shared";
+import type {
+  AircraftReport,
+  StationReport,
+  VesselReport,
+} from "@sdr/shared";
 import OLMap from "ol/Map";
 import View from "ol/View";
 import TileLayer from "ol/layer/Tile";
@@ -27,12 +31,20 @@ import {
   Circle as CircleStyle,
 } from "ol/style";
 import { categoryInfo, icaoInfo, type AircraftKind } from "@/lib/icao";
+import {
+  aprsKind,
+  aprsColor,
+  aprsRotates,
+  aprsKindLabel,
+  type AprsKind,
+} from "@/lib/aprs";
 import { distanceNm, bearing } from "@/lib/geo";
 import "ol/ol.css";
 
 interface Props {
   aircraft?: AircraftReport[];
   vessels?: VesselReport[];
+  stations?: StationReport[];
   selected: string | null;
   onSelect: (id: string | null) => void;
   refLat: number | null;
@@ -117,6 +129,88 @@ function vesselLabel(v: VesselReport): string {
   return v.sog != null && v.sog >= 0.5 ? `${id}\n${v.sog.toFixed(1)} kt` : id;
 }
 
+// APRS station markers: a small glyph per symbol kind. Vehicles/aircraft point
+// "up" so they can be rotated to course; fixed stations stay upright.
+const APRS_SHAPES: Record<AprsKind, (c: string) => string> = {
+  car: (c) =>
+    svg(
+      18,
+      `<rect x="8" y="3" width="8" height="18" rx="2.5" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>` +
+        `<rect x="9.5" y="5" width="5" height="4" rx="1" fill="#0b0f1a" opacity="0.5"/>`,
+    ),
+  truck: (c) =>
+    svg(
+      18,
+      `<rect x="8" y="2" width="8" height="20" rx="1.5" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>` +
+        `<rect x="9" y="3.5" width="6" height="5" rx="1" fill="#0b0f1a" opacity="0.5"/>`,
+    ),
+  bike: (c) =>
+    svg(
+      14,
+      `<circle cx="12" cy="12" r="4" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>`,
+    ),
+  person: (c) =>
+    svg(
+      16,
+      `<circle cx="12" cy="7" r="2.6" fill="${c}" stroke="#0b0f1a" stroke-width="0.7"/>` +
+        `<path d="M7 21 C7 15 9 13 12 13 C15 13 17 15 17 21 Z" fill="${c}" stroke="#0b0f1a" stroke-width="0.7"/>`,
+    ),
+  home: (c) =>
+    svg(
+      18,
+      `<path d="M12 3 L21 11 L18 11 L18 21 L6 21 L6 11 L3 11 Z" fill="${c}" stroke="#0b0f1a" stroke-width="0.8" stroke-linejoin="round"/>`,
+    ),
+  wx: (c) =>
+    svg(
+      18,
+      `<circle cx="12" cy="12" r="8" fill="none" stroke="${c}" stroke-width="2.2"/>` +
+        `<circle cx="12" cy="12" r="2.5" fill="${c}"/>`,
+    ),
+  balloon: (c) =>
+    svg(
+      18,
+      `<circle cx="12" cy="10" r="7" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>` +
+        `<line x1="12" y1="17" x2="12" y2="22" stroke="${c}" stroke-width="1.4"/>`,
+    ),
+  boat: (c) => shipSvg(c),
+  aircraft: (c) => planeSvg(c, 24),
+  digi: (c) =>
+    svg(
+      18,
+      `<path d="M12 3 L20 12 L12 21 L4 12 Z" fill="${c}" stroke="#0b0f1a" stroke-width="0.9" stroke-linejoin="round"/>`,
+    ),
+  phone: (c) =>
+    svg(
+      16,
+      `<rect x="8.5" y="3" width="7" height="18" rx="2" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>`,
+    ),
+  dot: (c) =>
+    svg(
+      14,
+      `<circle cx="12" cy="12" r="5" fill="${c}" stroke="#0b0f1a" stroke-width="0.9"/>`,
+    ),
+};
+
+function aprsIcon(
+  kind: AprsKind,
+  color: string,
+  rotation: number,
+  opacity: number,
+) {
+  return new Icon({
+    src: APRS_SHAPES[kind](color),
+    rotation,
+    opacity,
+    rotateWithView: true,
+  });
+}
+
+function stationLabel(s: StationReport): string {
+  return s.speed != null && s.speed >= 1
+    ? `${s.call}\n${s.speed.toFixed(0)} kt`
+    : s.call;
+}
+
 function altColor(alt?: number): string {
   if (alt == null) return "#9ca3af";
   const t = Math.min(1, Math.max(0, alt / 40000));
@@ -140,6 +234,7 @@ function label(a: AircraftReport): string {
 export function AdsbMap({
   aircraft = [],
   vessels = [],
+  stations = [],
   selected,
   onSelect,
   refLat,
@@ -153,6 +248,8 @@ export function AdsbMap({
   const rangeSrc = useRef<VectorSource | null>(null);
   const shipSrc = useRef<VectorSource | null>(null);
   const shipTrailSrc = useRef<VectorSource | null>(null);
+  const stationSrc = useRef<VectorSource | null>(null);
+  const stationTrailSrc = useRef<VectorSource | null>(null);
   const overlayRef = useRef<Overlay | null>(null);
   const planeFeats = useRef(new Map<string, Feature>());
   const trailFeats = useRef(new Map<string, Feature>());
@@ -160,6 +257,9 @@ export function AdsbMap({
   const shipFeats = useRef(new Map<string, Feature>());
   const shipTrailFeats = useRef(new Map<string, Feature>());
   const shipTrails = useRef(new Map<string, number[][]>());
+  const stationFeats = useRef(new Map<string, Feature>());
+  const stationTrailFeats = useRef(new Map<string, Feature>());
+  const stationTrails = useRef(new Map<string, number[][]>());
   const didFit = useRef(false);
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
@@ -172,6 +272,10 @@ export function AdsbMap({
     () => vessels.find((v) => v.mmsi === selected) ?? null,
     [vessels, selected],
   );
+  const selectedStation = useMemo(
+    () => stations.find((s) => s.call === selected) ?? null,
+    [stations, selected],
+  );
 
   // One-time map setup.
   useEffect(() => {
@@ -181,11 +285,15 @@ export function AdsbMap({
     const range = new VectorSource();
     const ships = new VectorSource();
     const shipTrailV = new VectorSource();
+    const stns = new VectorSource();
+    const stnTrailV = new VectorSource();
     planeSrc.current = planes;
     trailSrc.current = trailV;
     rangeSrc.current = range;
     shipSrc.current = ships;
     shipTrailSrc.current = shipTrailV;
+    stationSrc.current = stns;
+    stationTrailSrc.current = stnTrailV;
 
     const map = new OLMap({
       target: elRef.current,
@@ -196,7 +304,9 @@ export function AdsbMap({
         new VectorLayer({ source: range }),
         new VectorLayer({ source: trailV }),
         new VectorLayer({ source: shipTrailV }),
+        new VectorLayer({ source: stnTrailV }),
         new VectorLayer({ source: ships }),
+        new VectorLayer({ source: stns }),
         new VectorLayer({ source: planes }),
       ],
       view: new View({ center: fromLonLat([-98, 39]), zoom: 4 }),
@@ -220,7 +330,7 @@ export function AdsbMap({
       map.forEachFeatureAtPixel(
         e.pixel,
         (f) => {
-          const id = f.get("icao") ?? f.get("mmsi");
+          const id = f.get("icao") ?? f.get("mmsi") ?? f.get("call");
           if (id) {
             hit = id;
             return true;
@@ -472,6 +582,109 @@ export function AdsbMap({
     fitOnce(ssrc);
   }, [vessels, selected]);
 
+  // Sync APRS station markers + trails with the latest snapshot.
+  useEffect(() => {
+    const psrc = stationSrc.current;
+    const tsrc = stationTrailSrc.current;
+    if (!psrc || !tsrc) return;
+    const seen = new Set<string>();
+
+    for (const s of stations) {
+      if (s.lat == null || s.lon == null) continue;
+      seen.add(s.call);
+      const coord = fromLonLat([s.lon, s.lat]);
+      const kind = aprsKind(s.symbol);
+      const color = aprsColor(kind);
+      const opacity = Math.max(0.4, 1 - s.seen / STALE_S);
+      const isSel = s.call === selected;
+      const rot =
+        aprsRotates(kind) && s.course != null
+          ? (s.course * Math.PI) / 180
+          : 0;
+
+      // Trail history (moving stations).
+      let path = stationTrails.current.get(s.call);
+      if (!path) {
+        path = [];
+        stationTrails.current.set(s.call, path);
+      }
+      const last = path[path.length - 1];
+      if (!last || last[0] !== coord[0] || last[1] !== coord[1]) {
+        path.push(coord);
+        if (path.length > MAX_TRAIL) path.shift();
+      }
+      let tf = stationTrailFeats.current.get(s.call);
+      if (!tf) {
+        tf = new Feature(new LineString(path));
+        stationTrailFeats.current.set(s.call, tf);
+        tsrc.addFeature(tf);
+      } else {
+        (tf.getGeometry() as LineString).setCoordinates(path);
+      }
+      tf.setStyle(
+        new Style({
+          stroke: new Stroke({
+            color: isSel ? color : "rgba(160,170,190,0.4)",
+            width: isSel ? 2 : 1,
+          }),
+        }),
+      );
+
+      // Marker.
+      let f = stationFeats.current.get(s.call);
+      if (!f) {
+        f = new Feature({ geometry: new Point(coord) });
+        f.set("call", s.call);
+        stationFeats.current.set(s.call, f);
+        psrc.addFeature(f);
+      } else {
+        (f.getGeometry() as Point).setCoordinates(coord);
+      }
+      const styles: Style[] = [];
+      if (isSel) {
+        styles.push(
+          new Style({
+            image: new CircleStyle({
+              radius: 14,
+              stroke: new Stroke({ color: "#e5e7eb", width: 2 }),
+              fill: new Fill({ color: "rgba(229,231,235,0.12)" }),
+            }),
+          }),
+        );
+      }
+      styles.push(
+        new Style({
+          image: aprsIcon(kind, color, rot, opacity),
+          text: new Text({
+            text: stationLabel(s),
+            offsetY: 20,
+            font: "600 11px ui-monospace, Menlo, monospace",
+            fill: new Fill({ color: "#e8edf6" }),
+            stroke: new Stroke({ color: "rgba(8,12,20,0.9)", width: 3 }),
+            textAlign: "center",
+          }),
+        }),
+      );
+      f.setStyle(styles);
+    }
+
+    // Drop stations that aged out of the snapshot.
+    for (const [call, f] of stationFeats.current) {
+      if (!seen.has(call)) {
+        psrc.removeFeature(f);
+        stationFeats.current.delete(call);
+        const tf = stationTrailFeats.current.get(call);
+        if (tf) {
+          tsrc.removeFeature(tf);
+          stationTrailFeats.current.delete(call);
+        }
+        stationTrails.current.delete(call);
+      }
+    }
+
+    fitOnce(psrc);
+  }, [stations, selected]);
+
   // Fit the view once to whichever layer first has positioned targets.
   function fitOnce(src: VectorSource) {
     if (didFit.current || src.getFeatures().length === 0) return;
@@ -488,17 +701,17 @@ export function AdsbMap({
   useEffect(() => {
     const ov = overlayRef.current;
     if (!ov) return;
-    const t = selectedAircraft ?? selectedVessel;
+    const t = selectedAircraft ?? selectedVessel ?? selectedStation;
     if (t?.lat != null && t.lon != null) {
       ov.setPosition(fromLonLat([t.lon, t.lat]));
     } else {
       ov.setPosition(undefined);
     }
-  }, [selectedAircraft, selectedVessel]);
+  }, [selectedAircraft, selectedVessel, selectedStation]);
 
   const sel = selectedAircraft;
   const info = sel ? icaoInfo(sel.icao) : null;
-  const target = selectedAircraft ?? selectedVessel;
+  const target = selectedAircraft ?? selectedVessel ?? selectedStation;
   const dist =
     target?.lat != null && refLat != null && refLon != null
       ? distanceNm(refLat, refLon, target.lat, target.lon!)
@@ -563,6 +776,48 @@ export function AdsbMap({
               {brg != null && <Row k="Brg" v={`${brg.toFixed(0)}°`} />}
               <Row k="Sig" v={selectedVessel.rssi != null ? `${selectedVessel.rssi} dB` : "—"} />
             </dl>
+          </>
+        )}
+        {!sel && !selectedVessel && selectedStation && (
+          <>
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <span className="font-mono text-xs font-semibold text-foreground">
+                {selectedStation.call}
+              </span>
+              <span className="text-[10px] text-muted-foreground">
+                {aprsKindLabel(aprsKind(selectedStation.symbol))}
+              </span>
+            </div>
+            <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono text-muted-foreground">
+              <Row
+                k="Spd"
+                v={selectedStation.speed != null ? `${selectedStation.speed} kt` : "—"}
+              />
+              <Row
+                k="Crs"
+                v={selectedStation.course != null ? `${selectedStation.course}°` : "—"}
+              />
+              <Row
+                k="Alt"
+                v={
+                  selectedStation.altitude != null
+                    ? `${selectedStation.altitude.toLocaleString()} ft`
+                    : "—"
+                }
+              />
+              {dist != null && <Row k="Dist" v={`${dist.toFixed(0)} NM`} />}
+              {brg != null && <Row k="Brg" v={`${brg.toFixed(0)}°`} />}
+            </dl>
+            {selectedStation.via && (
+              <div className="mt-1 truncate font-mono text-[10px] text-muted-foreground/80">
+                via {selectedStation.via}
+              </div>
+            )}
+            {selectedStation.comment && (
+              <div className="mt-1 text-[10px] text-foreground/75">
+                {selectedStation.comment}
+              </div>
+            )}
           </>
         )}
       </div>

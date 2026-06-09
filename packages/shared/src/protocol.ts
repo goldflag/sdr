@@ -65,6 +65,36 @@ export const AIS_SAMPLE_RATE = 240_000;
 /** Channel offsets from the AIS centre frequency, in Hz. */
 export const AIS_CHANNELS = { A: -25_000, B: 25_000 } as const;
 
+/**
+ * APRS (Automatic Packet Reporting System) operating point. In North America
+ * APRS lives on 144.390 MHz: 1200-baud Bell-202 AFSK (1200/2200 Hz tones) inside
+ * an NBFM channel, carrying AX.25 UI frames. We capture at 240 kSPS and decimate
+ * by 5 to 48 kHz (40 samples per 1200-baud symbol).
+ */
+export const APRS_FREQ_HZ = 144_390_000;
+export const APRS_SAMPLE_RATE = 240_000;
+/**
+ * Tune the dongle this far below the APRS channel so the FM carrier sits clear
+ * of the RTL's centre DC spike; the receiver mixes it back down to baseband.
+ */
+export const APRS_IF_OFFSET = 30_000;
+
+/**
+ * ISM band OOK/ASK decode (rtl_433-style). 433.92 MHz is the busiest band for
+ * cheap sensors/remotes in most of the world; 315 MHz is common in North
+ * America. 250 kSPS gives ~4 µs pulse-timing resolution, matching rtl_433's
+ * default and comfortably resolving the ~250 µs–2 ms pulses these devices use.
+ */
+export const ISM_FREQ_HZ = 433_920_000;
+export const ISM_SAMPLE_RATE = 250_000;
+/** Quick-pick ISM centre frequencies (Hz), with labels. */
+export const ISM_BANDS = [
+  { hz: 315_000_000, label: "315" },
+  { hz: 433_920_000, label: "434" },
+  { hz: 868_300_000, label: "868" },
+  { hz: 915_000_000, label: "915" },
+] as const;
+
 /** Direct-sampling mode values passed straight to rtl_tcp / librtlsdr. */
 export const DIRECT_SAMPLING = {
   OFF: 0,
@@ -209,7 +239,13 @@ export type ClientMessage =
   /** Receiver location for single-frame (local) CPR position decoding. */
   | { type: "setAdsbRef"; lat: number | null; lon: number | null }
   /** Toggle AIS mode: retunes to 162 MHz @ 240 kSPS and decodes both channels. */
-  | { type: "setAis"; on: boolean };
+  | { type: "setAis"; on: boolean }
+  /** Toggle APRS mode: retunes to 144.39 MHz and decodes AX.25 AFSK packets. */
+  | { type: "setAprs"; on: boolean }
+  /** Toggle ISM (rtl_433-style) OOK decode at the current ISM frequency. */
+  | { type: "setIsm"; on: boolean }
+  /** Set the ISM centre frequency in Hz (315 / 434 / 868 / 915 MHz, …). */
+  | { type: "setIsmFreq"; hz: number };
 
 // ---------------------------------------------------------------------------
 // Server -> Client (JSON status)
@@ -256,6 +292,53 @@ export interface VesselReport {
   seen: number; // seconds since last message
 }
 
+/** One APRS station/object decoded from an AX.25 UI frame. */
+export interface StationReport {
+  /** Source callsign with SSID, e.g. "N0CALL-9". */
+  call: string;
+  lat?: number;
+  lon?: number;
+  course?: number; // degrees true
+  speed?: number; // knots
+  altitude?: number; // feet
+  /** APRS symbol as table+code, e.g. "/>" (car) or "/_" (weather). */
+  symbol?: string;
+  /** Free-text comment / status text. */
+  comment?: string;
+  /** Digipeater path the last packet travelled, e.g. "WIDE1-1,WIDE2-1". */
+  via?: string;
+  /** Packet category: "position" | "mic-e" | "object" | "status" | "message" | "other". */
+  kind?: string;
+  /** Last message addressed *to* another station (for message packets). */
+  message?: string;
+  packets: number;
+  seen: number; // seconds since last packet
+}
+
+/** One decoded (or raw) ISM-band OOK transmission. */
+export interface IsmEvent {
+  /** Monotonic id so the client can append only what it hasn't seen. */
+  id: number;
+  /** Server epoch milliseconds when the burst completed. */
+  time: number;
+  /** Decoder/device model, e.g. "EV1527" or "OOK" for an undecoded burst. */
+  model: string;
+  /** Line coding, e.g. "PWM". */
+  protocol: string;
+  /** Decoded bit count. */
+  bits: number;
+  /** Decoded payload as hex. */
+  code: string;
+  /** Device id (hex) when the protocol exposes one. */
+  deviceId?: string;
+  /** Human-readable decoded fields, e.g. "button 0x8". */
+  data?: string;
+  /** How many times this identical packet repeated within the burst. */
+  repeats: number;
+  /** Burst signal level, dB above the noise floor. */
+  snrDb: number;
+}
+
 export interface DeviceInfo {
   tuner: TunerType;
   tunerName: string;
@@ -293,6 +376,12 @@ export interface RadioState {
   adsb: boolean;
   /** When true the radio is decoding AIS (162 MHz) instead of audio. */
   ais: boolean;
+  /** When true the radio is decoding APRS (144.39 MHz) instead of audio. */
+  aprs: boolean;
+  /** When true the radio is decoding ISM-band OOK (rtl_433-style). */
+  ism: boolean;
+  /** Selected ISM centre frequency in Hz. */
+  ismFreqHz: number;
 }
 
 export type ServerMessage =
@@ -312,6 +401,30 @@ export type ServerMessage =
       vessels: VesselReport[];
       messageRate: number;
       framesSeen: number;
+    }
+  /**
+   * Periodic APRS station table snapshot (only while APRS is on). `framesSeen`
+   * is the running count of well-formed AX.25 bursts the demod found.
+   */
+  | {
+      type: "aprs";
+      stations: StationReport[];
+      messageRate: number;
+      framesSeen: number;
+    }
+  /**
+   * Recent ISM decode events (only while ISM is on). The client appends events
+   * whose `id` it hasn't seen yet. `bursts` is the total OOK bursts detected,
+   * `decoded` the subset that a protocol decoder recognised, `noiseDb` the
+   * current noise floor (dBFS), `freqHz` the tuned ISM centre frequency.
+   */
+  | {
+      type: "ism";
+      events: IsmEvent[];
+      bursts: number;
+      decoded: number;
+      noiseDb: number;
+      freqHz: number;
     }
   /** Scanner status, or null when scanning stops. */
   | { type: "scan"; status: ScanStatus | null }
@@ -447,4 +560,7 @@ export const DEFAULT_STATE: RadioState = {
   notches: [],
   adsb: false,
   ais: false,
+  aprs: false,
+  ism: false,
+  ismFreqHz: ISM_FREQ_HZ,
 };

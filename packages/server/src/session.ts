@@ -13,6 +13,10 @@ import {
   ADSB_SAMPLE_RATE,
   AIS_FREQ_HZ,
   AIS_SAMPLE_RATE,
+  APRS_FREQ_HZ,
+  APRS_IF_OFFSET,
+  APRS_SAMPLE_RATE,
+  ISM_SAMPLE_RATE,
   AUDIO_RATE,
   DEFAULT_BANDWIDTH,
   DEFAULT_STATE,
@@ -29,6 +33,8 @@ import { SpectrumAnalyzer } from "./dsp/fft";
 import { Demodulator } from "./dsp/demod";
 import { AdsbReceiver } from "./dsp/adsb";
 import { AisReceiver } from "./dsp/ais";
+import { AprsReceiver } from "./dsp/aprs";
+import { IsmReceiver } from "./dsp/ism";
 import { Nco } from "./dsp/nco";
 import { floatToInt16 } from "./dsp/resample";
 import { Scanner } from "./scanner";
@@ -37,6 +43,8 @@ const FFT_INTERVAL_MS = 50; // ~20 fps
 const FFT_SIZE = 2048;
 const ADSB_BROADCAST_MS = 1000; // aircraft table refresh rate
 const AIS_BROADCAST_MS = 1000; // vessel table refresh rate
+const APRS_BROADCAST_MS = 1000; // station table refresh rate
+const ISM_BROADCAST_MS = 500; // ISM event log refresh rate
 
 export interface RadioSinks {
   json: (msg: ServerMessage) => void;
@@ -59,6 +67,8 @@ export class Radio {
   private demod = new Demodulator();
   private adsb = new AdsbReceiver();
   private ais = new AisReceiver();
+  private aprs = new AprsReceiver();
+  private ism = new IsmReceiver();
   private scanner = new Scanner({
     tune: (e) => this.scanTune(e),
     status: (s) => {
@@ -76,6 +86,9 @@ export class Radio {
   private lastAdsbCount = 0;
   private lastAis = 0;
   private lastAisCount = 0;
+  private lastAprs = 0;
+  private lastAprsCount = 0;
+  private lastIsm = 0;
   // Receiver settings saved when entering a decode mode (ADS-B / AIS), restored
   // on exit.
   private preDecode: Pick<
@@ -271,8 +284,29 @@ export class Radio {
         if (msg.on) this.enterAis();
         else this.exitAis();
         break;
+      case "setAprs":
+        if (msg.on) this.enterAprs();
+        else this.exitAprs();
+        break;
+      case "setIsm":
+        if (msg.on) this.enterIsm();
+        else this.exitIsm();
+        break;
+      case "setIsmFreq":
+        this.state.ismFreqHz = msg.hz;
+        if (this.state.ism) {
+          this.state.centerHz = msg.hz;
+          this.ism.reset();
+          this.applyReceiver();
+        }
+        break;
       case "scanStart":
-        if (!this.state.adsb && !this.state.ais)
+        if (
+          !this.state.adsb &&
+          !this.state.ais &&
+          !this.state.aprs &&
+          !this.state.ism
+        )
           this.scanner.start(msg.config, Date.now());
         break;
       case "scanStop":
@@ -321,7 +355,7 @@ export class Radio {
   /** Retune to 1090 MHz @ 2 MSPS with max gain and start Mode S decoding. */
   private enterAdsb() {
     if (this.state.adsb) return;
-    this.exitAis(); // the dongle can only listen on one band at a time
+    this.exitDecoders(); // the dongle can only listen on one band at a time
     this.scanner.stop();
     this.saveDecodeState();
     const s = this.state;
@@ -347,7 +381,7 @@ export class Radio {
   /** Retune to 162 MHz @ 240 kSPS with max gain and start AIS decoding. */
   private enterAis() {
     if (this.state.ais) return;
-    this.exitAdsb(); // mutually exclusive with ADS-B
+    this.exitDecoders(); // mutually exclusive with the other decode modes
     this.scanner.stop();
     this.saveDecodeState();
     const s = this.state;
@@ -368,6 +402,66 @@ export class Radio {
     this.state.ais = false;
     this.restoreDecodeState();
     this.applyReceiver();
+  }
+
+  /** Retune to 144.39 MHz and start AFSK/AX.25 APRS decoding. */
+  private enterAprs() {
+    if (this.state.aprs) return;
+    this.exitDecoders();
+    this.scanner.stop();
+    this.saveDecodeState();
+    const s = this.state;
+    s.aprs = true;
+    // Tune below the channel so the FM carrier clears the centre DC spike.
+    s.centerHz = APRS_FREQ_HZ - APRS_IF_OFFSET;
+    s.sampleRate = APRS_SAMPLE_RATE;
+    s.directSampling = DIRECT_SAMPLING.OFF;
+    this.maxGain();
+    this.aprs.reset();
+    this.lastAprs = 0;
+    this.lastAprsCount = 0;
+    this.applyReceiver();
+  }
+
+  /** Leave APRS and restore the previous receiver settings. */
+  private exitAprs() {
+    if (!this.state.aprs) return;
+    this.state.aprs = false;
+    this.restoreDecodeState();
+    this.applyReceiver();
+  }
+
+  /** Retune to the selected ISM band @ 250 kSPS and start OOK decoding. */
+  private enterIsm() {
+    if (this.state.ism) return;
+    this.exitDecoders();
+    this.scanner.stop();
+    this.saveDecodeState();
+    const s = this.state;
+    s.ism = true;
+    s.centerHz = s.ismFreqHz;
+    s.sampleRate = ISM_SAMPLE_RATE;
+    s.directSampling = DIRECT_SAMPLING.OFF;
+    this.maxGain();
+    this.ism.reset();
+    this.lastIsm = 0;
+    this.applyReceiver();
+  }
+
+  /** Leave ISM and restore the previous receiver settings. */
+  private exitIsm() {
+    if (!this.state.ism) return;
+    this.state.ism = false;
+    this.restoreDecodeState();
+    this.applyReceiver();
+  }
+
+  /** Leave whichever decode mode is active (they're mutually exclusive). */
+  private exitDecoders() {
+    this.exitAdsb();
+    this.exitAis();
+    this.exitAprs();
+    this.exitIsm();
   }
 
   /** Push center freq / sample rate / gain / direct sampling to the device. */
@@ -488,6 +582,43 @@ export class Radio {
           vessels: this.ais.snapshot(now),
           messageRate: Math.round(rate),
           framesSeen: this.ais.candidateFrames,
+        });
+      }
+      return;
+    }
+
+    if (this.state.aprs) {
+      this.aprs.process(iq);
+      const now = Date.now();
+      if (now - this.lastAprs >= APRS_BROADCAST_MS) {
+        const total = this.aprs.totalMessages;
+        const rate = this.lastAprs
+          ? (total - this.lastAprsCount) / ((now - this.lastAprs) / 1000)
+          : 0;
+        this.lastAprs = now;
+        this.lastAprsCount = total;
+        this.sinks.json({
+          type: "aprs",
+          stations: this.aprs.snapshot(now),
+          messageRate: Math.round(rate),
+          framesSeen: this.aprs.candidateFrames,
+        });
+      }
+      return;
+    }
+
+    if (this.state.ism) {
+      this.ism.process(iq);
+      const now = Date.now();
+      if (now - this.lastIsm >= ISM_BROADCAST_MS) {
+        this.lastIsm = now;
+        this.sinks.json({
+          type: "ism",
+          events: this.ism.snapshot(),
+          bursts: this.ism.totalBursts,
+          decoded: this.ism.totalDecoded,
+          noiseDb: this.ism.noiseDb,
+          freqHz: this.state.centerHz,
         });
       }
       return;

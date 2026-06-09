@@ -11,6 +11,9 @@ import { useBookmarks } from "@/lib/bookmarks";
 import { Vfo } from "@/components/Vfo";
 import { AdsbPanel } from "@/components/AdsbPanel";
 import { AisPanel } from "@/components/AisPanel";
+import { AprsPanel } from "@/components/AprsPanel";
+import { IsmPanel } from "@/components/IsmPanel";
+import { IsmConsole } from "@/components/IsmConsole";
 import {
   SpectrumDisplay,
   DEFAULT_DISPLAY,
@@ -27,7 +30,10 @@ import {
   Activity,
   AlertTriangle,
   AudioWaveform,
+  Map as MapIcon,
   Plane,
+  RadioReceiver,
+  RadioTower,
   Ship,
   Volume1,
   Volume2,
@@ -39,9 +45,9 @@ const AdsbMap = lazy(() =>
   import("@/components/AdsbMap").then((m) => ({ default: m.AdsbMap })),
 );
 
-type View = "spectrum" | "track";
+type View = "spectrum" | "track" | "ism";
 /** Which decoder feeds the tracking map (the dongle does one band at a time). */
-type TrackSource = "adsb" | "ais";
+type TrackSource = "adsb" | "ais" | "aprs";
 
 export default function App() {
   const radio = useRadio();
@@ -64,20 +70,26 @@ export default function App() {
     saveDisplay(next);
   };
 
-  // Activate the decoder for a source (the server auto-disables the other one).
+  // Activate the decoder for a source (the server auto-disables the others).
   const activate = (s: TrackSource) => {
     if (s === "adsb") radio.send({ type: "setAdsb", on: true });
-    else radio.send({ type: "setAis", on: true });
+    else if (s === "ais") radio.send({ type: "setAis", on: true });
+    else radio.send({ type: "setAprs", on: true });
   };
 
   const switchView = (v: View) => {
     setView(v);
+    setSelected(null);
     if (v === "track") {
-      activate(source);
+      activate(source); // server auto-disables ISM / the other band
+    } else if (v === "ism") {
+      radio.send({ type: "setIsm", on: true });
     } else {
-      setSelected(null);
+      // Spectrum: leave every decode mode.
       radio.send({ type: "setAdsb", on: false });
       radio.send({ type: "setAis", on: false });
+      radio.send({ type: "setAprs", on: false });
+      radio.send({ type: "setIsm", on: false });
     }
   };
 
@@ -166,6 +178,23 @@ export default function App() {
               refLon={ref?.lon ?? null}
               onSetRef={setReceiverRef}
             />
+          ) : view === "track" && source === "aprs" ? (
+            <AprsPanel
+              stations={radio.stations}
+              messageRate={radio.aprsMessageRate}
+              framesSeen={radio.aprsFramesSeen}
+              selected={selected}
+              onSelect={setSelected}
+              refLat={ref?.lat ?? null}
+              refLon={ref?.lon ?? null}
+              onSetRef={setReceiverRef}
+            />
+          ) : view === "ism" ? (
+            <IsmPanel
+              stats={radio.ismStats}
+              ismFreqHz={state.ismFreqHz}
+              send={radio.send}
+            />
           ) : (
             <>
               <Presets state={state} send={radio.send} />
@@ -197,9 +226,17 @@ export default function App() {
                 <span className="font-mono text-[11px] text-muted-foreground">
                   {source === "adsb"
                     ? `${radio.aircraft.length} aircraft · ${radio.messageRate} msg/s`
-                    : `${radio.vessels.length} vessels · ${radio.aisMessageRate} msg/s`}
+                    : source === "ais"
+                      ? `${radio.vessels.length} vessels · ${radio.aisMessageRate} msg/s`
+                      : `${radio.stations.length} stations · ${radio.aprsMessageRate} msg/s`}
                 </span>
               </>
+            )}
+            {view === "ism" && (
+              <span className="font-mono text-[11px] text-muted-foreground">
+                {radio.ismStats?.decoded ?? 0} decoded ·{" "}
+                {radio.ismStats?.bursts ?? 0} bursts
+              </span>
             )}
             {view === "spectrum" && (
               <AudioControl
@@ -232,7 +269,7 @@ export default function App() {
                 />
               </div>
             </>
-          ) : (
+          ) : view === "track" ? (
             <div className="min-h-0 flex-1">
               <Suspense
                 fallback={
@@ -245,12 +282,20 @@ export default function App() {
                   key={source}
                   aircraft={source === "adsb" ? radio.aircraft : []}
                   vessels={source === "ais" ? radio.vessels : []}
+                  stations={source === "aprs" ? radio.stations : []}
                   selected={selected}
                   onSelect={setSelected}
                   refLat={ref?.lat ?? null}
                   refLon={ref?.lon ?? null}
                 />
               </Suspense>
+            </div>
+          ) : (
+            <div className="min-h-0 flex-1">
+              <IsmConsole
+                events={radio.ismEvents}
+                freqHz={radio.ismStats?.freqHz ?? state.ismFreqHz}
+              />
             </div>
           )}
         </main>
@@ -317,7 +362,8 @@ function ViewTabs({
 }) {
   const tabs: { id: View; label: string; icon: typeof Plane }[] = [
     { id: "spectrum", label: "Spectrum", icon: AudioWaveform },
-    { id: "track", label: "ADS-B / AIS", icon: Plane },
+    { id: "track", label: "Map", icon: MapIcon },
+    { id: "ism", label: "ISM 433", icon: RadioReceiver },
   ];
   return (
     <div className="flex items-center gap-0.5 rounded-md bg-muted/50 p-0.5">
@@ -355,6 +401,7 @@ function SourceToggle({
   const opts: { id: TrackSource; label: string; icon: typeof Plane }[] = [
     { id: "adsb", label: "Aircraft", icon: Plane },
     { id: "ais", label: "Ships", icon: Ship },
+    { id: "aprs", label: "APRS", icon: RadioTower },
   ];
   return (
     <div className="flex items-center gap-0.5 rounded-md border bg-muted/30 p-0.5">
@@ -460,6 +507,8 @@ function StatusBar({
 }) {
   const isAdsb = view === "track" && source === "adsb";
   const isAis = view === "track" && source === "ais";
+  const isAprs = view === "track" && source === "aprs";
+  const isIsm = view === "ism";
   return (
     <footer className="flex items-center justify-between gap-4 border-t bg-sidebar px-5 py-1.5 font-mono text-[11px] text-muted-foreground">
       <span className="flex items-center gap-1.5">
@@ -468,13 +517,21 @@ function StatusBar({
           ? "Decoding Mode S extended squitter at 1090 MHz · markers update live"
           : isAis
             ? "Decoding AIS GMSK on both channels at 162 MHz · markers update live"
-            : "Click to tune · scroll to zoom · drag filter edges · ⌥-click to notch"}
+            : isAprs
+              ? "Decoding AX.25 AFSK packets at 144.390 MHz · markers update live"
+              : isIsm
+                ? "Decoding ISM-band OOK · rtl_433-style pulse analysis"
+                : "Click to tune · scroll to zoom · drag filter edges · ⌥-click to notch"}
       </span>
       <div className="flex items-center gap-4">
         {isAdsb ? (
           <Stat label="FREQ" value="1090.000M" />
         ) : isAis ? (
           <Stat label="FREQ" value="162.000M" />
+        ) : isAprs ? (
+          <Stat label="FREQ" value="144.390M" />
+        ) : isIsm ? (
+          <Stat label="FREQ" value={`${(state.ismFreqHz / 1e6).toFixed(3)}M`} />
         ) : (
           <>
             <Stat label="MODE" value={state.mode} />

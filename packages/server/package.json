@@ -9,7 +9,9 @@
     "typecheck": "tsc --noEmit",
     "test:dsp": "bun run src/dsp/selftest.ts",
     "test:adsb": "bun run src/dsp/adsb-selftest.ts",
-    "test:ais": "bun run src/dsp/ais-selftest.ts"
+    "test:ais": "bun run src/dsp/ais-selftest.ts",
+    "test:aprs": "bun run src/dsp/aprs-selftest.ts",
+    "test:ism": "bun run src/dsp/ism-selftest.ts"
   },
   "dependencies": {
     "@sdr/shared": "workspace:*",
