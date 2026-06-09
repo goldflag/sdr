@@ -40,10 +40,17 @@ const EDGE_GRAB_PX = 7; // pointer distance to grab a filter edge
 const NOTCH_GRAB_PX = 7; // pointer distance to remove a notch
 const MIN_SPAN = 0.01; // max zoom = 100×
 const SPECTRUM_H = 168;
+const MAX_WATERFALL_ROWS = 4096;
 
 interface View {
   center: number; // 0..1 within the captured band
   span: number; // (0..1], fraction of the band shown
+}
+
+interface WaterfallRow {
+  centerHz: number;
+  sampleRate: number;
+  bins: Float32Array;
 }
 
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
@@ -90,6 +97,8 @@ export function SpectrumWaterfall({
   const fallRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<FftFrame | null>(null);
+  const historyRef = useRef<WaterfallRow[]>([]);
+  const pendingRows = useRef(0);
   // mutable mirrors for the draw loop / event handlers
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -99,14 +108,37 @@ export function SpectrumWaterfall({
   const dpr = useRef(1);
   const pal = useRef<Palette>(readPalette());
   const view = useRef<View>({ center: 0.5, span: 1 });
-  const viewDirty = useRef(false); // clear waterfall history on zoom/pan
+  const waterfallDirty = useRef(true);
+  const axisRef = useRef({ centerHz: state.centerHz, sampleRate: state.sampleRate });
   const [zoom, setZoom] = useState(1);
 
-  useEffect(() => subscribeFft((f) => (frameRef.current = f)), [subscribeFft]);
+  useEffect(
+    () =>
+      subscribeFft((f) => {
+        frameRef.current = f;
+        historyRef.current.push({
+          centerHz: f.centerHz,
+          sampleRate: f.sampleRate,
+          bins: new Float32Array(f.bins),
+        });
+        if (historyRef.current.length > MAX_WATERFALL_ROWS) {
+          historyRef.current.splice(
+            0,
+            historyRef.current.length - MAX_WATERFALL_ROWS,
+          );
+        }
+        pendingRows.current++;
+      }),
+    [subscribeFft],
+  );
+
+  useEffect(() => {
+    waterfallDirty.current = true;
+  }, [display]);
 
   const setView = (center: number, span: number) => {
     view.current = clampView(center, span);
-    viewDirty.current = true;
+    waterfallDirty.current = true;
     setZoom(1 / view.current.span);
   };
   const resetView = () => setView(0.5, 1);
@@ -133,6 +165,7 @@ export function SpectrumWaterfall({
       if (fall.width !== w || fall.height !== fallH) {
         fall.width = w;
         fall.height = fallH;
+        waterfallDirty.current = true;
       }
     };
     resize();
@@ -162,13 +195,12 @@ export function SpectrumWaterfall({
       const w = spec.width / ratio; // logical (CSS) px
       const h = SPECTRUM_H;
       sctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-
-      // Clear the waterfall history when the view changes (old rows used the
-      // previous mapping and would otherwise be misaligned).
-      if (viewDirty.current) {
-        fctx.fillStyle = p.screen;
-        fctx.fillRect(0, 0, fall.width, fall.height);
-        viewDirty.current = false;
+      if (
+        axisRef.current.centerHz !== s.centerHz ||
+        axisRef.current.sampleRate !== s.sampleRate
+      ) {
+        axisRef.current = { centerHz: s.centerHz, sampleRate: s.sampleRate };
+        waterfallDirty.current = true;
       }
 
       // Idle screen until the first frame arrives.
@@ -186,7 +218,6 @@ export function SpectrumWaterfall({
 
       const bins = frame.bins;
       const Nb = bins.length;
-      const lo = v.center - v.span / 2;
 
       // dB range: auto-scaling tracks the live floor/peak; manual uses fixed
       // floor/ceiling sliders for stable contrast.
@@ -210,13 +241,8 @@ export function SpectrumWaterfall({
       }
 
       // band fraction visible at pixel x -> bin value
-      const binAt = (frac: number) => {
-        const f = lo + frac * v.span;
-        let idx = (f * Nb) | 0;
-        if (idx < 0) idx = 0;
-        else if (idx >= Nb) idx = Nb - 1;
-        return bins[idx]!;
-      };
+      const binAt = (frac: number) =>
+        sampleRowAtHz(frame, visibleHzAt(s, v, frac)) ?? min;
 
       // --- spectrum: filled trace ---
       drawFilterOverlay(sctx, w, h, s, v, p);
@@ -247,19 +273,22 @@ export function SpectrumWaterfall({
       const fw = fall.width;
       const fh = fall.height;
       const lut = colormapLut(disp.colormap);
-      fctx.drawImage(fall, 0, 0, fw, fh, 0, 1, fw, fh); // scroll down 1px
-      const rowImg = fctx.createImageData(fw, 1);
-      const d = rowImg.data;
-      for (let x = 0; x < fw; x++) {
-        const norm = clamp01((binAt(x / fw) - min) / span);
-        const li = (norm * 255) | 0;
-        const o = x * 4;
-        d[o] = lut[li * 3]!;
-        d[o + 1] = lut[li * 3 + 1]!;
-        d[o + 2] = lut[li * 3 + 2]!;
-        d[o + 3] = 255;
+      const rows = historyRef.current;
+      if (waterfallDirty.current) {
+        fctx.clearRect(0, 0, fw, fh);
+        drawWaterfallRows(fctx, rows, 0, fw, fh, s, v, min, span, lut);
+        pendingRows.current = 0;
+        waterfallDirty.current = false;
+      } else if (pendingRows.current > 0) {
+        const count = Math.min(pendingRows.current, fh, rows.length);
+        if (count >= fh) {
+          fctx.clearRect(0, 0, fw, fh);
+        } else {
+          fctx.drawImage(fall, 0, 0, fw, fh - count, 0, count, fw, fh - count);
+        }
+        drawWaterfallRows(fctx, rows, 0, fw, count, s, v, min, span, lut);
+        pendingRows.current = 0;
       }
-      fctx.putImageData(rowImg, 0, 0);
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
@@ -438,6 +467,58 @@ export function SpectrumWaterfall({
 }
 
 // --- canvas helpers --------------------------------------------------------
+
+function visibleHzAt(s: RadioState, v: View, frac: number): number {
+  const bandFrac = v.center - v.span / 2 + frac * v.span;
+  return s.centerHz + (bandFrac - 0.5) * s.sampleRate;
+}
+
+function sampleRowAtHz(row: WaterfallRow | FftFrame, hz: number): number | null {
+  const f = (hz - (row.centerHz - row.sampleRate / 2)) / row.sampleRate;
+  if (f < 0 || f >= 1) return null;
+  let idx = (f * row.bins.length) | 0;
+  if (idx < 0) idx = 0;
+  else if (idx >= row.bins.length) idx = row.bins.length - 1;
+  return row.bins[idx] ?? null;
+}
+
+function drawWaterfallRows(
+  ctx: CanvasRenderingContext2D,
+  rows: WaterfallRow[],
+  newestOffset: number,
+  width: number,
+  height: number,
+  s: RadioState,
+  v: View,
+  min: number,
+  span: number,
+  lut: Uint8ClampedArray,
+) {
+  if (width <= 0 || height <= 0) return;
+  const img = ctx.createImageData(width, height);
+  const data = img.data;
+  const hzByX = new Float64Array(width);
+  for (let x = 0; x < width; x++) {
+    hzByX[x] = visibleHzAt(s, v, (x + 0.5) / width);
+  }
+
+  for (let y = 0; y < height; y++) {
+    const row = rows[rows.length - 1 - newestOffset - y];
+    if (!row) continue;
+    for (let x = 0; x < width; x++) {
+      const val = sampleRowAtHz(row, hzByX[x]!);
+      if (val == null) continue;
+      const li = (clamp01((val - min) / span) * 255) | 0;
+      const o = (y * width + x) * 4;
+      data[o] = lut[li * 3]!;
+      data[o + 1] = lut[li * 3 + 1]!;
+      data[o + 2] = lut[li * 3 + 2]!;
+      data[o + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(img, 0, 0);
+}
 
 /** Pixel x for a band fraction (0..1), through the current view window. */
 function bandFracToX(w: number, v: View, f: number): number {
