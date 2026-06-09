@@ -3,6 +3,11 @@ import { BAND_PRESETS } from "@/lib/bands";
 import { applyTuning, tuningMatches } from "@/lib/tuning";
 import { Section } from "@/components/Controls";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 interface Props {
   state: RadioState;
@@ -21,14 +26,18 @@ export function Presets({ state, send }: Props) {
             state.mode,
           );
           return (
-            <Button
-              key={p.name}
-              variant={active ? "default" : "outline"}
-              size="xs"
-              onClick={() => applyTuning(send, p)}
-            >
-              {p.name}
-            </Button>
+            <Tooltip key={p.name}>
+              <TooltipTrigger asChild>
+                <Button
+                  variant={active ? "default" : "outline"}
+                  size="xs"
+                  onClick={() => applyTuning(send, p)}
+                >
+                  {p.name}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{p.description}</TooltipContent>
+            </Tooltip>
           );
         })}
       </div>

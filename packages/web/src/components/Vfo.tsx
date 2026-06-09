@@ -12,12 +12,27 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { LIMITS, MODES } from "@sdr/shared";
 import type { ClientMessage, Mode, RadioState } from "@sdr/shared";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { ChevronUp, ChevronDown, Crosshair } from "lucide-react";
 
 interface Props {
   state: RadioState;
   send: (msg: ClientMessage) => void;
 }
+
+// Plain-language explanation of each demodulation mode, shown on hover.
+const MODE_DESCRIPTIONS: Record<Mode, string> = {
+  WFM: "Wideband FM — commercial FM broadcast (~200 kHz wide). Hi-fi music and stereo.",
+  NFM: "Narrowband FM — ham/business/weather voice (~12.5 kHz). The default for VHF/UHF radios.",
+  AM: "Amplitude modulation — aircraft band, shortwave broadcast, and CB.",
+  USB: "Upper sideband — efficient SSB voice. Standard on HF bands above 10 MHz.",
+  LSB: "Lower sideband — efficient SSB voice. Standard on HF bands below 10 MHz.",
+  CW: "Continuous wave — Morse code, heard as a tone via a built-in beat oscillator.",
+};
 
 // Ten digit positions, high → low: 1 GHz down to 1 Hz (max tunable is 1766 MHz).
 const PLACES = [1e9, 1e8, 1e7, 1e6, 1e5, 1e4, 1e3, 1e2, 1e1, 1e0];
@@ -91,13 +106,17 @@ export function Vfo({ state, send }: Props) {
         aria-label="Demodulation mode"
       >
         {MODES.map((m) => (
-          <ToggleGroupItem
-            key={m}
-            value={m}
-            className="px-3 font-mono text-xs data-[state=on]:bg-primary data-[state=on]:text-primary-foreground"
-          >
-            {m}
-          </ToggleGroupItem>
+          <Tooltip key={m}>
+            <TooltipTrigger asChild>
+              <ToggleGroupItem
+                value={m}
+                className="px-3 font-mono text-xs data-[state=on]:bg-primary data-[state=on]:text-primary-foreground"
+              >
+                {m}
+              </ToggleGroupItem>
+            </TooltipTrigger>
+            <TooltipContent>{MODE_DESCRIPTIONS[m]}</TooltipContent>
+          </Tooltip>
         ))}
       </ToggleGroup>
     </div>
