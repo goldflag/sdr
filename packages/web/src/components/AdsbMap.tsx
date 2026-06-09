@@ -406,6 +406,68 @@ function opacityForAge(seen: number, floor: number, ageFade: boolean): number {
   return ageFade ? Math.max(floor, 1 - seen / STALE_S) : 1;
 }
 
+// --- smooth motion (dead reckoning) ----------------------------------------
+//
+// ADS-B position fixes land every few seconds, so markers would otherwise jump.
+// Between fixes we extrapolate each aircraft forward from its last reported
+// position along its heading at its ground speed, every animation frame. When a
+// fresh fix arrives we don't snap to it: we record the small offset between
+// where the marker is and where the new fix predicts, then bleed that offset off
+// over MOTION_CORRECT_MS so the path stays continuous.
+
+const MOTION_CORRECT_MS = 700; // ease a position correction over this window
+const MAX_EXTRAPOLATE_S = 8; // cap dead reckoning so a stalled feed can't fling markers
+const KNOTS_TO_MS = 0.514444;
+
+interface MotionState {
+  lat: number;
+  lon: number;
+  speed: number; // knots; 0 = stationary/unknown -> no extrapolation
+  heading: number; // degrees
+  epoch: number; // client ms the reported position was valid
+  corr: [number, number]; // residual mercator offset, bled off after a correction
+  corrEpoch: number; // client ms the correction was applied
+}
+
+// Move a lat/lon forward by distM metres along a compass bearing (great-circle).
+function projectLatLon(
+  lat: number,
+  lon: number,
+  bearingDeg: number,
+  distM: number,
+): [number, number] {
+  const R = 6378137;
+  const d = distM / R;
+  const br = (bearingDeg * Math.PI) / 180;
+  const la1 = (lat * Math.PI) / 180;
+  const lo1 = (lon * Math.PI) / 180;
+  const la2 = Math.asin(
+    Math.sin(la1) * Math.cos(d) + Math.cos(la1) * Math.sin(d) * Math.cos(br),
+  );
+  const lo2 =
+    lo1 +
+    Math.atan2(
+      Math.sin(br) * Math.sin(d) * Math.cos(la1),
+      Math.cos(d) - Math.sin(la1) * Math.sin(la2),
+    );
+  return [(lo2 * 180) / Math.PI, (la2 * 180) / Math.PI];
+}
+
+function predictLonLat(m: MotionState, now: number): [number, number] {
+  if (m.speed <= 0.5) return [m.lon, m.lat];
+  const elapsed = Math.min((now - m.epoch) / 1000, MAX_EXTRAPOLATE_S);
+  if (elapsed <= 0) return [m.lon, m.lat];
+  return projectLatLon(m.lat, m.lon, m.heading, m.speed * KNOTS_TO_MS * elapsed);
+}
+
+// Rendered mercator coordinate: extrapolated position + the decaying correction.
+function motionCoord(m: MotionState, now: number): number[] {
+  const [lon, lat] = predictLonLat(m, now);
+  const merc = fromLonLat([lon, lat]);
+  const k = Math.max(0, 1 - (now - m.corrEpoch) / MOTION_CORRECT_MS);
+  return [merc[0]! + m.corr[0] * k, merc[1]! + m.corr[1] * k];
+}
+
 export function AdsbMap({
   aircraft = [],
   vessels = [],
@@ -434,6 +496,9 @@ export function AdsbMap({
   const planeFeats = useRef(new Map<string, Feature>());
   const trailFeats = useRef(new Map<string, Feature>());
   const trails = useRef(new Map<string, number[][]>());
+  const motion = useRef(new Map<string, MotionState>());
+  const motionStamp = useRef<AircraftReport[] | null>(null);
+  const reducedMotion = useRef(false);
   const shipFeats = useRef(new Map<string, Feature>());
   const shipTrailFeats = useRef(new Map<string, Feature>());
   const shipTrails = useRef(new Map<string, number[][]>());
@@ -443,6 +508,8 @@ export function AdsbMap({
   const didFit = useRef(false);
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const refPos = useRef<{ lat: number | null; lon: number | null }>({
     lat: refLat,
     lon: refLon,
@@ -709,12 +776,53 @@ export function AdsbMap({
     src.addFeature(me);
   }, [refLat, refLon, settings.rangeRings, settings.receiver]);
 
+  // Track the OS "reduce motion" preference; when set, markers step with the
+  // data instead of being animated between fixes.
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const apply = () => (reducedMotion.current = mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+
+  // Animation loop: dead-reckon every aircraft forward each frame so they fly
+  // continuously between position fixes. Static/stale aircraft (speed 0) hold
+  // their reported coordinate, so this is cheap even with a busy sky.
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      if (reducedMotion.current) return;
+      const now = Date.now();
+      for (const [icao, m] of motion.current) {
+        // Nothing to animate for a parked marker with no pending correction.
+        if (m.speed <= 0.5 && now - m.corrEpoch > MOTION_CORRECT_MS) continue;
+        const f = planeFeats.current.get(icao);
+        if (f) (f.getGeometry() as Point).setCoordinates(motionCoord(m, now));
+      }
+      // Keep the on-map popup glued to the selected aircraft as it moves.
+      const sel = selectedRef.current;
+      if (sel) {
+        const m = motion.current.get(sel);
+        if (m) overlayRef.current?.setPosition(motionCoord(m, now));
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
   // Sync aircraft markers + trails with the latest snapshot.
   useEffect(() => {
     const psrc = planeSrc.current;
     const tsrc = trailSrc.current;
     if (!psrc || !tsrc) return;
     const seen = new Set<string>();
+    // Only re-seed motion when the data actually changed (not on a zoom/label
+    // restyle, which reruns this effect with the same array reference).
+    const now = Date.now();
+    const fresh = aircraft !== motionStamp.current;
+    if (fresh) motionStamp.current = aircraft;
 
     for (const a of aircraft) {
       if (a.lat == null || a.lon == null) continue;
@@ -760,9 +868,36 @@ export function AdsbMap({
         f.set("icao", a.icao);
         planeFeats.current.set(a.icao, f);
         psrc.addFeature(f);
-      } else {
+      } else if (reducedMotion.current) {
+        // Animated path lets the rAF loop own the geometry; here we step it.
         (f.getGeometry() as Point).setCoordinates(coord);
       }
+
+      // Re-seed the motion model from this fix, preserving visual continuity.
+      if (fresh) {
+        const moving =
+          a.speed != null &&
+          a.speed > 0.5 &&
+          a.heading != null &&
+          a.seen <= MAX_EXTRAPOLATE_S;
+        const next: MotionState = {
+          lat: a.lat,
+          lon: a.lon,
+          speed: moving ? a.speed! : 0,
+          heading: a.heading ?? 0,
+          epoch: now - Math.min(a.seen, MAX_EXTRAPOLATE_S) * 1000,
+          corr: [0, 0],
+          corrEpoch: now,
+        };
+        const prev = motion.current.get(a.icao);
+        if (prev) {
+          const rendered = motionCoord(prev, now);
+          const base = fromLonLat(predictLonLat(next, now));
+          next.corr = [rendered[0]! - base[0]!, rendered[1]! - base[1]!];
+        }
+        motion.current.set(a.icao, next);
+      }
+
       const styles: Style[] = [];
       if (isSel) {
         styles.push(
@@ -796,6 +931,7 @@ export function AdsbMap({
       if (!seen.has(icao)) {
         psrc.removeFeature(f);
         planeFeats.current.delete(icao);
+        motion.current.delete(icao);
         const tf = trailFeats.current.get(icao);
         if (tf) {
           tsrc.removeFeature(tf);

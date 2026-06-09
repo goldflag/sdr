@@ -1,9 +1,12 @@
 // ISM main view: a live, newest-first log of decoded OOK transmissions, in the
-// spirit of rtl_433's console. Named protocols (EV1527, …) show their device id
-// and data; unrecognised bursts are logged raw as "OOK" with their sliced bits.
+// spirit of rtl_433's console. Named sensors (Acurite/LaCrosse weather, EV1527
+// remotes) render their readings as chips; unrecognised bursts are logged raw as
+// "OOK" with their sliced hex and hidden behind a toggle so noise doesn't bury
+// the real decodes.
 
 import type { IsmEvent } from "@sdr/shared";
-import { RadioReceiver } from "lucide-react";
+import { Droplets, RadioReceiver, Thermometer } from "lucide-react";
+import { useState } from "react";
 
 interface Props {
   events: IsmEvent[];
@@ -17,98 +20,134 @@ function clock(ms: number): string {
 }
 
 export function IsmConsole({ events, freqHz }: Props) {
+  const [showRaw, setShowRaw] = useState(false);
+  const hidden = events.filter((e) => e.model === "OOK").length;
+  const shown = showRaw ? events : events.filter((e) => e.model !== "OOK");
+
   if (events.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
         <RadioReceiver className="size-7 opacity-50" />
         <p className="text-sm">Listening on {(freqHz / 1e6).toFixed(2)} MHz…</p>
         <p className="max-w-sm text-center text-xs text-muted-foreground/80">
-          Press a 433 MHz remote, doorbell, TPMS sensor or weather station near
-          the antenna. Decoded transmissions appear here as they arrive.
+          Trigger a 433 MHz device near the antenna — a weather station, keyfob,
+          doorbell or TPMS sensor. Recognised sensors decode to live readings;
+          everything else is logged raw.
         </p>
       </div>
     );
   }
 
   return (
-    <div className="scroll-thin h-full overflow-y-auto">
-      <table className="w-full text-left font-mono text-xs">
-        <thead className="sticky top-0 z-10 bg-background text-muted-foreground/70">
-          <tr className="border-b">
-            <Th>Time</Th>
-            <Th>Model</Th>
-            <Th>Proto</Th>
-            <Th className="text-right">Bits</Th>
-            <Th>Data</Th>
-            <Th className="text-right">×</Th>
-            <Th className="text-right">SNR</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {events.map((e) => {
-            const named = e.model !== "OOK";
-            return (
-              <tr
-                key={e.id}
-                className="border-b border-border/40 hover:bg-accent/30"
-              >
-                <Td className="text-muted-foreground">{clock(e.time)}</Td>
-                <Td>
-                  <span
-                    className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                      named
-                        ? "bg-primary/20 text-primary"
-                        : "bg-muted text-muted-foreground"
-                    }`}
-                  >
-                    {e.model}
-                  </span>
-                </Td>
-                <Td className="text-muted-foreground">{e.protocol}</Td>
-                <Td className="text-right tabular-nums text-muted-foreground">
-                  {e.bits}
-                </Td>
-                <Td className="text-foreground">
-                  {e.deviceId ? (
-                    <span>
-                      <span className="text-muted-foreground">id</span> {e.deviceId}
-                      {e.data ? ` · ${e.data}` : ""}
-                    </span>
-                  ) : (
-                    <span className="text-foreground/80">0x{e.code}</span>
-                  )}
-                </Td>
-                <Td className="text-right tabular-nums text-muted-foreground">
-                  {e.repeats}
-                </Td>
-                <Td className="text-right tabular-nums text-muted-foreground">
-                  {e.snrDb.toFixed(0)}
-                </Td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+    <div className="flex h-full flex-col">
+      <div className="flex items-center justify-between border-b px-3 py-1.5 text-xs text-muted-foreground">
+        <span className="tabular-nums">
+          {shown.length} {showRaw ? "events" : "decoded"}
+        </span>
+        <label className="flex cursor-pointer items-center gap-1.5 select-none">
+          <input
+            type="checkbox"
+            checked={showRaw}
+            onChange={(e) => setShowRaw(e.target.checked)}
+            className="size-3 accent-primary"
+          />
+          Show raw{hidden > 0 ? ` (${hidden})` : ""}
+        </label>
+      </div>
+
+      <div className="scroll-thin flex-1 overflow-y-auto">
+        {shown.length === 0 ? (
+          <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+            No named devices decoded yet. {hidden > 0 ? `${hidden} raw burst${hidden === 1 ? "" : "s"} hidden — tick “Show raw”.` : ""}
+          </p>
+        ) : (
+          <table className="w-full text-left font-mono text-xs">
+            <tbody>
+              {shown.map((e) => (
+                <Row key={e.id} e={e} />
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
 
-function Th({
-  children,
-  className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return <th className={`px-3 py-2 font-medium ${className}`}>{children}</th>;
+function Row({ e }: { e: IsmEvent }) {
+  const named = e.model !== "OOK";
+  return (
+    <tr className="border-b border-border/40 align-middle hover:bg-accent/30">
+      <td className="whitespace-nowrap px-3 py-1.5 text-muted-foreground">
+        {clock(e.time)}
+      </td>
+      <td className="px-3 py-1.5">
+        <span
+          className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+            named ? "bg-primary/20 text-primary" : "bg-muted text-muted-foreground"
+          }`}
+        >
+          {e.model}
+        </span>
+        {e.deviceId && (
+          <span className="ml-1.5 text-muted-foreground">
+            0x{e.deviceId}
+            {e.channel ? <span className="opacity-60"> · ch {e.channel}</span> : null}
+          </span>
+        )}
+      </td>
+      <td className="px-3 py-1.5">
+        <Reading e={e} />
+      </td>
+      <td className="px-3 py-1.5 text-right tabular-nums text-muted-foreground">
+        {e.repeats > 1 ? `×${e.repeats}` : ""}
+      </td>
+      <td className="px-3 py-1.5 text-right tabular-nums text-muted-foreground/70">
+        {e.snrDb.toFixed(0)} dB
+      </td>
+    </tr>
+  );
 }
 
-function Td({
-  children,
-  className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return <td className={`px-3 py-1.5 ${className}`}>{children}</td>;
+function Reading({ e }: { e: IsmEvent }) {
+  // Weather sensors: render readings as chips.
+  if (e.tempC !== undefined || e.humidityPct !== undefined) {
+    return (
+      <span className="flex flex-wrap items-center gap-1.5">
+        {e.tempC !== undefined && (
+          <Chip>
+            <Thermometer className="size-3 opacity-70" />
+            {e.tempC.toFixed(1)}°C
+          </Chip>
+        )}
+        {e.humidityPct !== undefined && (
+          <Chip>
+            <Droplets className="size-3 opacity-70" />
+            {e.humidityPct}%
+          </Chip>
+        )}
+        {e.batteryLow && (
+          <span className="rounded bg-destructive/20 px-1.5 py-0.5 text-[10px] font-semibold text-destructive">
+            batt low
+          </span>
+        )}
+      </span>
+    );
+  }
+  // Named-but-not-weather (e.g. EV1527 remotes): show the decoded field.
+  if (e.data) return <span className="text-foreground/80">{e.data}</span>;
+  // Raw: the sliced hex, dimmed.
+  return (
+    <span className="text-muted-foreground/70">
+      0x{e.code} <span className="opacity-50">· {e.bits} bits</span>
+    </span>
+  );
+}
+
+function Chip({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1 rounded bg-muted/60 px-1.5 py-0.5 text-foreground tabular-nums">
+      {children}
+    </span>
+  );
 }

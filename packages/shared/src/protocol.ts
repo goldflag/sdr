@@ -340,6 +340,14 @@ export interface IsmEvent {
   deviceId?: string;
   /** Human-readable decoded fields, e.g. "button 0x8". */
   data?: string;
+  /** Sub-channel label (A/B/C or 0–2) when the device exposes one. */
+  channel?: string;
+  /** Temperature in °C, for decoded weather sensors. */
+  tempC?: number;
+  /** Relative humidity %, for decoded weather sensors. */
+  humidityPct?: number;
+  /** True when the device reports a low battery. */
+  batteryLow?: boolean;
   /** How many times this identical packet repeated within the burst. */
   repeats: number;
   /** Burst signal level, dB above the noise floor. */

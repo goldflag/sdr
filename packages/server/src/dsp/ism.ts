@@ -37,8 +37,11 @@ export class IsmReceiver {
   private nextId = 1;
   private bursts = 0;
   private decoded = 0;
-  // key (model:code) -> event, to collapse a device's repeated transmissions.
-  private recent = new Map<string, IsmEvent>();
+  // key (model:code) -> {event, visible}, to collapse a device's repeated
+  // transmissions. `visible` gates noisy/untrusted bursts: a raw or CRC-only
+  // decode is held out of the event log until it repeats (real devices transmit
+  // 3–10×; random noise almost never reproduces the same code).
+  private recent = new Map<string, { ev: IsmEvent; visible: boolean }>();
 
   get totalBursts(): number {
     return this.bursts;
@@ -123,54 +126,77 @@ export class IsmReceiver {
   }
 
   private decode(pulses: number[], gaps: number[], snr: number) {
+    // Slice the PWM bitstream once (bit = pulse longer than its gap); the named
+    // sensor decoders scan it for a CRC-valid frame, tolerating any leading sync
+    // bits. A passing checksum/parity is what turns hex noise into real values.
+    const bits = sliceBitsPwm(pulses, gaps);
+
+    const acu = decodeAcurite(bits);
+    if (acu) return this.emitDecoded("Acurite-Tower", acu, snr, true);
+
+    const lac = decodeLaCrosse(bits);
+    // Digest-only, no constant guard → trust it only once it repeats.
+    if (lac) return this.emitDecoded("LaCrosse-TX", lac, snr, false);
+
     const ev = decodeEv1527(pulses, gaps);
-    if (ev) {
-      this.decoded++;
-      this.emit("EV1527", "PWM", ev.bits, ev.code, snr, ev.deviceId, ev.data);
-      return;
-    }
+    if (ev) return this.emitDecoded("EV1527", ev, snr, true);
+
     const g = decodeGeneric(pulses, gaps);
-    if (g) this.emit("OOK", "PWM", g.bits, g.code, snr);
+    if (g)
+      this.emit(
+        { model: "OOK", protocol: "PWM", bits: g.bits, code: g.code, snrDb: snr },
+        false,
+      );
   }
 
-  private emit(
-    model: string,
-    protocol: string,
-    bits: number,
-    code: string,
-    snrDb: number,
-    deviceId?: string,
-    data?: string,
-  ) {
+  private emitDecoded(model: string, d: Decoded, snrDb: number, trusted: boolean) {
+    this.decoded++;
+    this.emit(
+      {
+        model,
+        protocol: "PWM",
+        bits: d.bits,
+        code: d.code,
+        snrDb,
+        deviceId: d.deviceId,
+        data: d.data,
+        channel: d.channel,
+        tempC: d.tempC,
+        humidityPct: d.humidityPct,
+        batteryLow: d.batteryLow,
+      },
+      trusted,
+    );
+  }
+
+  private emit(fields: Omit<IsmEvent, "id" | "time" | "repeats">, trusted: boolean) {
     const now = Date.now();
-    const key = `${model}:${code}`;
-    const prev = this.recent.get(key);
-    if (prev && now - prev.time < DEDUP_MS) {
-      prev.repeats++;
-      prev.time = now;
-      prev.snrDb = snrDb;
-      return; // fold into the existing event; client updates it by id
+    const key = `${fields.model}:${fields.code}`;
+    const w = this.recent.get(key);
+    if (w && now - w.ev.time < DEDUP_MS) {
+      w.ev.repeats++;
+      w.ev.time = now;
+      w.ev.snrDb = fields.snrDb;
+      this.show(w); // a confirming repeat promotes a previously-held burst
+      return;
     }
-    const event: IsmEvent = {
-      id: this.nextId++,
-      time: now,
-      model,
-      protocol,
-      bits,
-      code,
-      deviceId,
-      data,
-      repeats: 1,
-      snrDb,
-    };
-    this.recent.set(key, event);
-    this.events.push(event);
-    if (this.events.length > MAX_EVENTS) this.events.shift();
+    const entry = { ev: { id: 0, time: now, repeats: 1, ...fields }, visible: false };
+    this.recent.set(key, entry);
+    if (trusted) this.show(entry); // strong structural guard → show immediately
     // Drop stale dedup keys so the map can't grow without bound.
     if (this.recent.size > 256) {
       for (const [k, e] of this.recent)
-        if (now - e.time > DEDUP_MS) this.recent.delete(k);
+        if (now - e.ev.time > DEDUP_MS) this.recent.delete(k);
     }
+  }
+
+  /** Reveal a held event, assigning it a fresh id so it surfaces newest-first. */
+  private show(entry: { ev: IsmEvent; visible: boolean }) {
+    if (entry.visible) return;
+    entry.visible = true;
+    entry.ev.id = this.nextId++;
+    this.events.push(entry.ev);
+    if (this.events.length > MAX_EVENTS) this.events.shift();
   }
 }
 
@@ -183,6 +209,139 @@ interface Decoded {
   code: string;
   deviceId?: string;
   data?: string;
+  channel?: string;
+  tempC?: number;
+  humidityPct?: number;
+  batteryLow?: boolean;
+}
+
+// --- bit/byte helpers shared by the framed (CRC) decoders -------------------
+
+/**
+ * Slice a PWM burst to a bitstream: each pulse/gap pair is a '1' when the pulse
+ * is the longer of the two, else '0'. EV1527, Acurite and LaCrosse all use this
+ * "long mark = 1" convention, so one slice feeds every framed decoder. Sync
+ * pulses (roughly equal mark/space) become stray bits the decoders skip past.
+ */
+function sliceBitsPwm(pulses: number[], gaps: number[]): number[] {
+  const n = Math.min(pulses.length, gaps.length);
+  const bits: number[] = new Array(n);
+  for (let i = 0; i < n; i++) bits[i] = pulses[i]! > gaps[i]! ? 1 : 0;
+  return bits;
+}
+
+/** Pack `count` bytes MSB-first from `bits` starting at `off`. */
+function packBytes(bits: number[], off: number, count: number): number[] {
+  const out: number[] = new Array(count);
+  for (let b = 0; b < count; b++) {
+    let v = 0;
+    for (let i = 0; i < 8; i++) v = (v << 1) | bits[off + b * 8 + i]!;
+    out[b] = v;
+  }
+  return out;
+}
+
+/** 1 if the byte has an odd number of set bits (used for even-parity checks). */
+function parity8(v: number): number {
+  v ^= v >> 4;
+  v ^= v >> 2;
+  v ^= v >> 1;
+  return v & 1;
+}
+
+/**
+ * rtl_433's reflected byte-wise LFSR digest (lfsr_digest8_reflect): bytes are
+ * consumed last-to-first, bits LSB-first, XORing the rolling key into the sum on
+ * each set bit. Used as the checksum for several LaCrosse sensors.
+ */
+function lfsrDigest8Reflect(
+  msg: number[],
+  bytes: number,
+  gen: number,
+  key: number,
+): number {
+  let sum = 0;
+  for (let k = bytes - 1; k >= 0; k--) {
+    const data = msg[k]!;
+    for (let i = 0; i < 8; i++) {
+      if ((data >> i) & 1) sum ^= key;
+      key = key & 1 ? (key >> 1) ^ gen : key >> 1;
+    }
+  }
+  return sum & 0xff;
+}
+
+const hex = (b: number[]): string =>
+  b.map((x) => x.toString(16).padStart(2, "0")).join("");
+
+/**
+ * Acurite 592TXR / Tower (433.92 MHz) temp+humidity. 7-byte PWM frame:
+ *   b0: CC IIIIII   channel(2) + id high(6)
+ *   b1: IIIIIIII    id low(8)
+ *   b2: p B 00 0100 parity + battery + constant message-type 0x04
+ *   b3: p HHHHHHH   parity + humidity %
+ *   b4: p ?? TTTTT  parity + temp high
+ *   b5: p TTTTTTT   parity + temp low
+ *   b6: checksum = (b0+…+b5) & 0xff
+ * Guarded by the checksum, per-byte even parity on b2–b5, and the fixed 0x04
+ * message-type nibble — together ~1-in-130k against random bits.
+ */
+function decodeAcurite(bits: number[]): Decoded | null {
+  for (let off = 0; off + 56 <= bits.length; off++) {
+    const b = packBytes(bits, off, 7);
+    if (((b[0]! + b[1]! + b[2]! + b[3]! + b[4]! + b[5]!) & 0xff) !== b[6]!) continue;
+    if (parity8(b[2]!) || parity8(b[3]!) || parity8(b[4]!) || parity8(b[5]!)) continue;
+    if ((b[2]! & 0x3f) !== 0x04) continue; // constant message type
+    const humidity = b[3]! & 0x7f;
+    const tempRaw = ((b[4]! & 0x7f) << 7) | (b[5]! & 0x7f);
+    const tempC = (tempRaw - 1000) / 10;
+    if (tempC < -40 || tempC > 70 || humidity < 1 || humidity > 99) continue;
+    const id = ((b[0]! & 0x3f) << 8) | b[1]!;
+    const channel = ["C", "x", "B", "A"][(b[0]! >> 6) & 0x3]!;
+    return {
+      bits: 56,
+      code: hex(b),
+      deviceId: id.toString(16).padStart(4, "0"),
+      channel,
+      tempC,
+      humidityPct: humidity,
+      batteryLow: (b[2]! & 0x40) === 0,
+      data: `${tempC.toFixed(1)}°C ${humidity}% ch${channel}`,
+    };
+  }
+  return null;
+}
+
+/**
+ * LaCrosse TX141TH-Bv2 (433.92 MHz) temp+humidity. 5-byte PWM frame:
+ *   b0: id(8)
+ *   b1: BAT(1) TEST(1) CH(2) TEMPhi(4)
+ *   b2: TEMPlo(8)   temp_c = (raw - 500)/10
+ *   b3: humidity %
+ *   b4: lfsr_digest8_reflect(b0..b3, gen 0x31, key 0xf4)
+ * Digest-only, so a single hit is held until it repeats (see emitDecoded).
+ */
+function decodeLaCrosse(bits: number[]): Decoded | null {
+  for (let off = 0; off + 40 <= bits.length; off++) {
+    const b = packBytes(bits, off, 5);
+    if (lfsrDigest8Reflect(b, 4, 0x31, 0xf4) !== b[4]!) continue;
+    const tempRaw = ((b[1]! & 0x0f) << 8) | b[2]!;
+    const tempC = (tempRaw - 500) / 10;
+    const humidity = b[3]!;
+    if (tempC < -40 || tempC > 60 || humidity > 100) continue;
+    const channel = ((b[1]! >> 4) & 0x3).toString();
+    return {
+      bits: 40,
+      code: hex(b),
+      deviceId: b[0]!.toString(16).padStart(2, "0"),
+      channel,
+      tempC,
+      humidityPct: humidity,
+      batteryLow: ((b[1]! >> 7) & 1) === 1,
+      data: `${tempC.toFixed(1)}°C ${humidity}% ch${channel}`,
+    };
+  }
+  return null;
 }
 
 /**

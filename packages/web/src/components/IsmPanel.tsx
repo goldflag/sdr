@@ -44,7 +44,10 @@ export function IsmPanel({ stats, ismFreqHz, send }: Props) {
 
         <div className="mt-3 grid grid-cols-2 gap-2">
           <Stat label="Decoded" value={String(stats?.decoded ?? 0)} />
-          <Stat label="Bursts" value={String(stats?.bursts ?? 0)} />
+          <Stat
+            label="Undecoded"
+            value={String(Math.max(0, (stats?.bursts ?? 0) - (stats?.decoded ?? 0)))}
+          />
           <Stat
             label="Noise"
             value={stats ? `${stats.noiseDb.toFixed(0)} dB` : "—"}
@@ -57,9 +60,9 @@ export function IsmPanel({ stats, ismFreqHz, send }: Props) {
 
         <p className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
           <RadioReceiver className="mt-px size-3 shrink-0" />
-          Listening for on-off-keyed remotes and sensors. Trigger a 433 MHz
-          keyfob, doorbell or weather station nearby — recognised codes (e.g.
-          EV1527) are named; everything else is logged raw.
+          Decodes on-off-keyed sensors: Acurite &amp; LaCrosse weather stations
+          (temp/humidity), plus EV1527 keyfobs and doorbells. Unrecognised bursts
+          are counted as “undecoded” and only shown raw on request.
         </p>
       </Section>
     </div>
