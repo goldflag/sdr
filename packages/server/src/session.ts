@@ -7,6 +7,7 @@ import {
   type DeviceInfo,
   type Mode,
   type RadioState,
+  type ScanEntry,
   type ServerMessage,
   ADSB_FREQ_HZ,
   ADSB_SAMPLE_RATE,
@@ -27,6 +28,7 @@ import { Demodulator } from "./dsp/demod";
 import { AdsbReceiver } from "./dsp/adsb";
 import { Nco } from "./dsp/nco";
 import { floatToInt16 } from "./dsp/resample";
+import { Scanner } from "./scanner";
 
 const FFT_INTERVAL_MS = 50; // ~20 fps
 const FFT_SIZE = 2048;
@@ -37,12 +39,29 @@ export interface RadioSinks {
   binary: (buf: ArrayBuffer) => void;
 }
 
+/** Message types that represent a manual retune and should cancel a scan. */
+const MANUAL_TUNE = new Set<ClientMessage["type"]>([
+  "setFrequency",
+  "setVfoOffset",
+  "setMode",
+  "setSampleRate",
+  "setDirectSampling",
+]);
+
 export class Radio {
   private manager: RtlTcpManager;
   private client: RtlTcpClient | null = null;
   private spectrum = new SpectrumAnalyzer(FFT_SIZE);
   private demod = new Demodulator();
   private adsb = new AdsbReceiver();
+  private scanner = new Scanner({
+    tune: (e) => this.scanTune(e),
+    status: (s) => {
+      this.scanHolding = s?.holding ?? false;
+      this.sinks.json({ type: "scan", status: s });
+    },
+  });
+  private scanHolding = false;
   private vfo = new Nco(DEFAULT_STATE.sampleRate, 0);
   private deviceInfo: DeviceInfo | null = null;
   private state: RadioState = { ...DEFAULT_STATE };
@@ -140,6 +159,9 @@ export class Radio {
   // --- control ---
 
   handle(msg: ClientMessage) {
+    // Any manual retune cancels an active scan.
+    if (this.scanner.active && MANUAL_TUNE.has(msg.type)) this.scanner.stop();
+
     switch (msg.type) {
       case "start":
         void this.start();
@@ -237,6 +259,15 @@ export class Radio {
       case "setAdsbRef":
         this.adsb.setRef(msg.lat, msg.lon);
         break;
+      case "scanStart":
+        if (!this.state.adsb) this.scanner.start(msg.config, Date.now());
+        break;
+      case "scanStop":
+        this.scanner.stop();
+        break;
+      case "scanSkip":
+        this.scanner.skip(Date.now());
+        break;
     }
     this.broadcastState();
   }
@@ -244,6 +275,7 @@ export class Radio {
   /** Retune to 1090 MHz @ 2 MSPS with max gain and start Mode S decoding. */
   private enterAdsb() {
     if (this.state.adsb) return;
+    this.scanner.stop();
     const s = this.state;
     this.preAdsb = {
       centerHz: s.centerHz,
@@ -342,6 +374,29 @@ export class Radio {
     this.demod.setNotchOffsets(this.state.notches.map((hz) => hz - tuned));
   }
 
+  /** Retune for the scanner: centre on the channel, VFO at DC, set mode/BW. */
+  private scanTune(e: ScanEntry) {
+    const s = this.state;
+    s.vfoOffset = 0;
+    this.vfo.setFreq(0);
+    if (e.directSampling !== undefined && e.directSampling !== s.directSampling) {
+      s.directSampling = e.directSampling;
+      this.client?.setDirectSampling(e.directSampling);
+    }
+    s.centerHz = e.hz;
+    this.client?.setFrequency(e.hz);
+    if (e.mode !== s.mode) {
+      s.mode = e.mode;
+      s.bandwidth = DEFAULT_BANDWIDTH[e.mode];
+    }
+    if (e.bandwidth) s.bandwidth = e.bandwidth;
+    const [lo, hi] = defaultEdges(s.mode, s.bandwidth);
+    s.filterLow = lo;
+    s.filterHigh = hi;
+    this.reconfigureDemod();
+    this.broadcastState();
+  }
+
   // --- IQ processing ---
 
   private onIq(iq: Float32Array) {
@@ -381,14 +436,24 @@ export class Radio {
     const shifted = this.vfo.mix(iq, new Float32Array(iq.length));
     const { audio, powerDb } = this.demod.process(shifted);
 
+    // Drive the scanner with the live channel power.
+    if (this.scanner.active) this.scanner.onPower(powerDb, now);
+
     const squelch = this.state.squelchDb;
-    const open = squelch == null || powerDb >= squelch;
+    const squelchOpen = squelch == null || powerDb >= squelch;
+    // While scanning, only pass audio once parked on an active channel, so we
+    // don't blast noise from every silent channel we step across.
+    const open = squelchOpen && (!this.scanner.active || this.scanHolding);
     if (audio.length > 0 && open) {
       this.sinks.binary(encodeAudioFrame(AUDIO_RATE, floatToInt16(audio)));
     }
     if (now - this.lastSignal >= 100) {
       this.lastSignal = now;
-      this.sinks.json({ type: "signal", channelDb: powerDb, squelchOpen: open });
+      this.sinks.json({
+        type: "signal",
+        channelDb: powerDb,
+        squelchOpen: squelchOpen,
+      });
     }
   }
 

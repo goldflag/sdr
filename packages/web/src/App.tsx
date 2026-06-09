@@ -6,6 +6,8 @@ import { SpectrumWaterfall } from "@/components/SpectrumWaterfall";
 import { Controls } from "@/components/Controls";
 import { Presets } from "@/components/Presets";
 import { Bookmarks } from "@/components/Bookmarks";
+import { Scanner } from "@/components/Scanner";
+import { useBookmarks } from "@/lib/bookmarks";
 import { Vfo } from "@/components/Vfo";
 import { AdsbPanel } from "@/components/AdsbPanel";
 import {
@@ -32,6 +34,7 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [ref, setRef] = useState<{ lat: number; lon: number } | null>(loadRef);
   const [display, setDisplay] = useState<DisplaySettings>(loadDisplay);
+  const bm = useBookmarks();
 
   const state = radio.state ?? DEFAULT_STATE;
 
@@ -99,7 +102,13 @@ export default function App() {
           ) : (
             <>
               <Presets state={state} send={radio.send} />
-              <Bookmarks state={state} send={radio.send} />
+              <Scanner
+                state={state}
+                send={radio.send}
+                scan={radio.scan}
+                bookmarks={bm.items}
+              />
+              <Bookmarks state={state} send={radio.send} bm={bm} />
               <Controls
                 state={state}
                 deviceInfo={radio.deviceInfo}

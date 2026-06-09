@@ -105,6 +105,57 @@ export function gainStepsDb(tuner: number): number[] {
 }
 
 // ---------------------------------------------------------------------------
+// Scanner
+// ---------------------------------------------------------------------------
+
+/** One channel the scanner can park on. */
+export interface ScanEntry {
+  hz: number;
+  mode: Mode;
+  bandwidth?: number;
+  directSampling?: DirectSampling;
+  label?: string;
+}
+
+/** Behaviour shared by both scan kinds. */
+interface ScanCommon {
+  /** Channel power (dB) above which a channel counts as active. */
+  thresholdDb: number;
+  /** How long to listen on a silent channel before stepping on (ms). */
+  dwellMs: number;
+  /** After a held signal drops, how long to wait before resuming (ms). */
+  resumeMs: number;
+}
+
+export type ScanConfig =
+  | ({ kind: "channels"; entries: ScanEntry[] } & ScanCommon)
+  | ({
+      kind: "range";
+      startHz: number;
+      stopHz: number;
+      stepHz: number;
+      mode: Mode;
+      directSampling?: DirectSampling;
+    } & ScanCommon);
+
+/** Live scanner status pushed to clients. */
+export interface ScanStatus {
+  kind: "channels" | "range";
+  index: number;
+  total: number;
+  currentHz: number;
+  mode: Mode;
+  /** True while parked on an active channel. */
+  holding: boolean;
+}
+
+export const SCAN_DEFAULTS = {
+  thresholdDb: -45,
+  dwellMs: 250,
+  resumeMs: 2000,
+} as const;
+
+// ---------------------------------------------------------------------------
 // Client -> Server (JSON control)
 // ---------------------------------------------------------------------------
 
@@ -128,6 +179,11 @@ export type ClientMessage =
   | { type: "setAgc"; mode: AgcMode }
   /** Manual notch filters, as absolute RF frequencies in Hz. */
   | { type: "setNotches"; notches: number[] }
+  /** Start scanning (channel list or range sweep). */
+  | { type: "scanStart"; config: ScanConfig }
+  | { type: "scanStop" }
+  /** Force-advance to the next channel/step. */
+  | { type: "scanSkip" }
   /** Gain control: auto AGC, or a manual gain in dB (snapped to a tuner step). */
   | { type: "setGain"; mode: "auto" | "manual"; db?: number }
   /** Squelch threshold in dB of channel power; null disables squelch. */
@@ -208,6 +264,8 @@ export type ServerMessage =
   | { type: "signal"; channelDb: number; squelchOpen: boolean }
   /** Periodic ADS-B aircraft table snapshot (only while ADS-B is on). */
   | { type: "adsb"; aircraft: AircraftReport[]; messageRate: number }
+  /** Scanner status, or null when scanning stops. */
+  | { type: "scan"; status: ScanStatus | null }
   | { type: "error"; message: string };
 
 // ---------------------------------------------------------------------------

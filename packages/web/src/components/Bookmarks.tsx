@@ -1,5 +1,5 @@
 import type { ClientMessage, RadioState } from "@sdr/shared";
-import { useBookmarks } from "@/lib/bookmarks";
+import type { useBookmarks } from "@/lib/bookmarks";
 import { applyTuning, tuningMatches } from "@/lib/tuning";
 import { Section } from "@/components/Controls";
 import { Button } from "@/components/ui/button";
@@ -9,10 +9,11 @@ import { Plus, Trash2 } from "lucide-react";
 interface Props {
   state: RadioState;
   send: (msg: ClientMessage) => void;
+  bm: ReturnType<typeof useBookmarks>;
 }
 
-export function Bookmarks({ state, send }: Props) {
-  const { items, add, remove } = useBookmarks();
+export function Bookmarks({ state, send, bm }: Props) {
+  const { items, add, remove } = bm;
   const tuned = state.centerHz + state.vfoOffset;
 
   const addCurrent = () => {
