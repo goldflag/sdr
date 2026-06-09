@@ -31,6 +31,9 @@ const MAX_FRAME_BITS = 1024; // guard against runaway frames
 // DC-blocker corner for the discriminator output (~76 Hz @ 48 kHz). Removes the
 // constant frequency bias a tuner offset adds, so the bit slicer stays centred.
 const DC_ALPHA = 0.01;
+// A burst counts as "real" only if its envelope is this far above the noise
+// floor (≈3.5 dB) — rejects flags that random noise throws off.
+const SNR_GATE = 1.5;
 
 interface Vessel {
   mmsi: string;
@@ -179,8 +182,12 @@ class ChannelDemod {
   private prevSign = 1;
   // Running mean of the discriminator output (removed before slicing).
   private dcMean = 0;
-  // Rolling signal estimate (mean |z|), stamped onto decoded frames.
-  private magAvg = 0;
+  // Signal envelope vs. noise floor (fast / slow EMAs of |z|), used to tell a
+  // real burst from a noise-triggered false flag.
+  private env = 0;
+  private floor = 0;
+  // Count of well-formed frames that coincided with signal above the floor.
+  private candidateCount = 0;
 
   constructor(
     offsetHz: number,
@@ -192,10 +199,17 @@ class ChannelDemod {
     this.decim = new ComplexDecimator(taps, DECIM);
     // Matched-ish receive filter: low-pass the discriminator near half the baud.
     this.matched = new RealFir(designLowpass(31, BAUD / 2 / BB_RATE));
-    this.hdlc = new HdlcDeframer((bytes) => {
-      const rssi = 20 * Math.log10(Math.max(this.magAvg, 1e-4));
-      this.sink(bytes, this.channel, rssi);
-    });
+    this.hdlc = new HdlcDeframer(
+      (bytes) => {
+        const rssi = 20 * Math.log10(Math.max(this.env, 1e-4));
+        this.sink(bytes, this.channel, rssi);
+      },
+      // Only count a candidate burst when the envelope is clearly above the
+      // noise floor — otherwise it's a random flag in noise.
+      () => {
+        if (this.env > this.floor * SNR_GATE) this.candidateCount++;
+      },
+    );
   }
 
   reset() {
@@ -204,12 +218,14 @@ class ChannelDemod {
     this.pll = 0;
     this.prevSign = 1;
     this.dcMean = 0;
-    this.magAvg = 0;
+    this.env = 0;
+    this.floor = 0;
+    this.candidateCount = 0;
     this.hdlc.reset();
   }
 
   get candidates(): number {
-    return this.hdlc.candidates;
+    return this.candidateCount;
   }
 
   process(iq: Float32Array) {
@@ -231,7 +247,8 @@ class ChannelDemod {
       this.dcMean += DC_ALPHA * (d - this.dcMean);
       demod[k] = d - this.dcMean; // remove carrier-offset bias
       const mag = Math.sqrt(i * i + q * q);
-      this.magAvg += 0.001 * (mag - this.magAvg);
+      this.env += 0.02 * (mag - this.env); // fast envelope (~1 ms)
+      this.floor += 0.0002 * (mag - this.floor); // slow noise floor (~100 ms)
       pi = i;
       pq = q;
     }
@@ -282,11 +299,12 @@ export class HdlcDeframer {
   private ones = 0;
   private shiftReg = 0;
   private inFrame = false;
-  /** Count of well-formed (flag-delimited, byte-aligned) frames seen, valid or
-   * not — a rough "is AIS energy reaching the decoder?" activity gauge. */
-  candidates = 0;
-
-  constructor(private onFrame: (bytes: Uint8Array) => void) {}
+  constructor(
+    private onFrame: (bytes: Uint8Array) => void,
+    /** Fired for each well-formed (flag-delimited, byte-aligned) frame, valid
+     * or not. The owner decides whether it counts (e.g. gating on signal). */
+    private onCandidate?: () => void,
+  ) {}
 
   reset() {
     this.lastLevel = 0;
@@ -294,7 +312,6 @@ export class HdlcDeframer {
     this.ones = 0;
     this.shiftReg = 0;
     this.inFrame = false;
-    this.candidates = 0;
   }
 
   push(level: number) {
@@ -308,7 +325,7 @@ export class HdlcDeframer {
       // (0111111) before recognising it on the trailing 0 — drop them.
       if (this.inFrame && this.bits.length >= 7) {
         const frame = this.bits.slice(0, this.bits.length - 7);
-        if (frame.length >= 40 && frame.length % 8 === 0) this.candidates++;
+        if (frame.length >= 40 && frame.length % 8 === 0) this.onCandidate?.();
         const bytes = checkFrame(frame);
         if (bytes) this.onFrame(bytes);
       }
