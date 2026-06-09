@@ -8,6 +8,11 @@ import { Presets } from "@/components/Presets";
 import { Bookmarks } from "@/components/Bookmarks";
 import { Vfo } from "@/components/Vfo";
 import { AdsbPanel } from "@/components/AdsbPanel";
+import {
+  SpectrumDisplay,
+  DEFAULT_DISPLAY,
+  type DisplaySettings,
+} from "@/components/SpectrumDisplay";
 import { Activity, AlertTriangle, AudioWaveform, Plane } from "lucide-react";
 
 // OpenLayers is heavy; only load the map when the ADS-B view is opened.
@@ -26,8 +31,14 @@ export default function App() {
   const [view, setView] = useState<View>("spectrum");
   const [selected, setSelected] = useState<string | null>(null);
   const [ref, setRef] = useState<{ lat: number; lon: number } | null>(loadRef);
+  const [display, setDisplay] = useState<DisplaySettings>(loadDisplay);
 
   const state = radio.state ?? DEFAULT_STATE;
+
+  const updateDisplay = (next: DisplaySettings) => {
+    setDisplay(next);
+    saveDisplay(next);
+  };
 
   const switchView = (v: View) => {
     setView(v);
@@ -102,6 +113,7 @@ export default function App() {
                 audioRunning={audioRunning}
                 onEnableAudio={enableAudio}
               />
+              <SpectrumDisplay display={display} onChange={updateDisplay} />
             </>
           )}
         </aside>
@@ -125,6 +137,7 @@ export default function App() {
                 <SpectrumWaterfall
                   subscribeFft={radio.subscribeFft}
                   state={state}
+                  display={display}
                   onTune={(hz) => radio.send({ type: "setVfoOffset", hz })}
                   onPassband={(low, high) =>
                     radio.send({ type: "setPassband", low, high })
@@ -184,6 +197,26 @@ function saveRef(r: { lat: number; lon: number } | null) {
   }
 }
 
+const DISPLAY_KEY = "sdr.display";
+
+function loadDisplay(): DisplaySettings {
+  try {
+    const v = localStorage.getItem(DISPLAY_KEY);
+    if (v) return { ...DEFAULT_DISPLAY, ...JSON.parse(v) };
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_DISPLAY;
+}
+
+function saveDisplay(d: DisplaySettings) {
+  try {
+    localStorage.setItem(DISPLAY_KEY, JSON.stringify(d));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 function ViewTabs({
   view,
   onChange,
@@ -235,7 +268,7 @@ function StatusBar({
         <Activity className="size-3 text-primary" />
         {view === "adsb"
           ? "Decoding Mode S extended squitter at 1090 MHz · markers update live"
-          : "Click the spectrum to tune · scroll a digit to nudge · click it to type"}
+          : "Click to tune · scroll to zoom · drag filter edges · ⌥-click to notch"}
       </span>
       <div className="flex items-center gap-4">
         {view === "adsb" ? (
