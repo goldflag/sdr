@@ -8,3 +8,6 @@ packages/web/dist/
 recordings/
 *.iq
 *.wav
+.agents/
+.cursor/
+.claude/
