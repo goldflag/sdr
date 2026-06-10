@@ -11,6 +11,7 @@ export class PcmPlayer {
   private gain: GainNode | null = null;
   private volume = 0.7;
   private ready = false;
+  private initPromise: Promise<void> | null = null;
 
   /** Must be called from a user gesture (browsers block autoplay). */
   async init(): Promise<void> {
@@ -18,6 +19,20 @@ export class PcmPlayer {
       await this.ctx.resume();
       return;
     }
+    // Serialize concurrent calls (e.g. a double-click on "Enable audio") so we
+    // don't build two AudioContexts — the second would orphan the first (leak)
+    // and play doubled/echoed audio. this.ctx is only set after two awaits, so
+    // the cheap `if (this.ctx)` guard alone can't catch a concurrent caller.
+    if (this.initPromise) return this.initPromise;
+    this.initPromise = this.buildGraph();
+    try {
+      await this.initPromise;
+    } finally {
+      this.initPromise = null;
+    }
+  }
+
+  private async buildGraph(): Promise<void> {
     const ctx = new AudioContext({ sampleRate: AUDIO_RATE });
     await ctx.audioWorklet.addModule(workletUrl);
     const node = new AudioWorkletNode(ctx, "pcm-player", {

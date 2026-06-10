@@ -122,7 +122,10 @@ export class Demodulator {
     if (mode === "WFM") audioCut = 15_000;
     else if (mode === "NFM") audioCut = Math.min(4_000, width / 2);
     else if (mode === "AM") audioCut = Math.min(width / 2, 6_000);
-    else audioCut = Math.min(width, 3_500); // SSB/CW
+    // SSB/CW: the recombined audio sits at [low, high], so its highest component
+    // is max(|low|,|high|) — for CW the passband is offset up by CW_TONE, so a
+    // plain `width` cutoff would roll off the beat tone itself.
+    else audioCut = Math.min(Math.max(Math.abs(low), Math.abs(high)), 3_500);
     audioCut = Math.min(audioCut, this.channelRate * 0.45);
     this.audioFir = new RealFir(
       designLowpass(tapsFor(0.05), audioCut / this.channelRate),

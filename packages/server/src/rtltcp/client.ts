@@ -19,6 +19,8 @@ export class RtlTcpClient {
   private socket: Socket | null = null;
   private headerBuf = new Uint8Array(0);
   private header: DongleHeader | null = null;
+  // A trailing odd byte held back from the previous chunk to keep I/Q paired.
+  private iqLeftover: number | null = null;
 
   private onHeaderCb?: (h: DongleHeader) => void;
   private onIqCb?: (iq: Float32Array) => void;
@@ -68,6 +70,7 @@ export class RtlTcpClient {
   close() {
     this.socket?.end();
     this.socket = null;
+    this.iqLeftover = null;
   }
 
   private onData(chunk: Uint8Array) {
@@ -104,14 +107,22 @@ export class RtlTcpClient {
 
     if (data.length === 0 || !this.onIqCb) return;
 
-    // Normalize uint8 IQ -> interleaved float complex in [-1, 1). Every byte
-    // maps the same way; I/Q pairing is preserved downstream because the
-    // consumer buffers the stream continuously (no bytes dropped).
-    const out = new Float32Array(data.length);
-    for (let i = 0; i < data.length; i++) {
-      out[i] = (data[i]! - 127.5) / 127.5;
+    // Normalize uint8 IQ -> interleaved float complex in [-1, 1). TCP does not
+    // preserve message boundaries and a chunk (or the post-header remainder) can
+    // be odd-length, which would split an I/Q pair and swap I/Q for the rest of
+    // the stream. Carry any trailing odd byte to the next chunk so we only ever
+    // emit whole pairs and the I/Q phase stays aligned.
+    const carry = this.iqLeftover !== null ? 1 : 0;
+    const total = carry + data.length;
+    const pairBytes = total - (total & 1); // largest even count <= total
+    if (pairBytes > 0) {
+      const out = new Float32Array(pairBytes);
+      let oi = 0;
+      if (carry) out[oi++] = (this.iqLeftover! - 127.5) / 127.5;
+      for (let i = 0; oi < pairBytes; i++) out[oi++] = (data[i]! - 127.5) / 127.5;
+      this.onIqCb(out);
     }
-    this.onIqCb(out);
+    this.iqLeftover = total & 1 ? data[data.length - 1]! : null;
   }
 
   // --- control commands ---

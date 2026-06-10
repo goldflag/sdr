@@ -72,10 +72,13 @@ const NLETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ"; // 24 letters, no I or O
 
 function suffix(rem: number): string {
   if (rem === 0) return "";
+  // The FAA suffix space is interleaved, not two flat blocks: each first letter
+  // owns 25 codes — the single letter itself (offset 0) followed by its 24
+  // two-letter children (offsets 1..24). So "" , A, AA, AB … AZ, B, BA …, ZZ.
   rem -= 1;
-  if (rem < 24) return NLETTERS[rem]!;
-  rem -= 24;
-  return NLETTERS[Math.floor(rem / 24)]! + NLETTERS[rem % 24]!;
+  const first = NLETTERS[Math.floor(rem / 25)]!;
+  const second = rem % 25;
+  return second === 0 ? first : first + NLETTERS[second - 1]!;
 }
 
 export function usRegistration(icao: number): string | null {

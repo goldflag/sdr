@@ -558,9 +558,13 @@ export class Radio {
     const s = this.state;
     s.vfoOffset = 0;
     this.vfo.setFreq(0);
-    if (e.directSampling !== undefined && e.directSampling !== s.directSampling) {
-      s.directSampling = e.directSampling;
-      this.client?.setDirectSampling(e.directSampling);
+    // Entries that omit directSampling mean "off" — restore it, otherwise a
+    // prior HF entry's Q-branch mode persists onto a following VHF/UHF entry and
+    // that channel just receives noise.
+    const ds = e.directSampling ?? DIRECT_SAMPLING.OFF;
+    if (ds !== s.directSampling) {
+      s.directSampling = ds;
+      this.client?.setDirectSampling(ds);
     }
     s.centerHz = e.hz;
     this.client?.setFrequency(e.hz);
