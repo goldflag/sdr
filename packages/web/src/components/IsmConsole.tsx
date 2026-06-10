@@ -5,7 +5,14 @@
 // the real decodes.
 
 import type { IsmEvent } from "@sdr/shared";
-import { Droplets, RadioReceiver, Thermometer } from "lucide-react";
+import {
+  CloudRain,
+  Droplets,
+  Gauge,
+  RadioReceiver,
+  Thermometer,
+  Wind,
+} from "lucide-react";
 import { useState } from "react";
 
 interface Props {
@@ -17,6 +24,11 @@ function clock(ms: number): string {
   const d = new Date(ms);
   const p = (n: number) => String(n).padStart(2, "0");
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+function compass(deg: number): string {
+  return COMPASS[Math.round(deg / 45) % 8]!;
 }
 
 export function IsmConsole({ events, freqHz }: Props) {
@@ -111,7 +123,14 @@ function Row({ e }: { e: IsmEvent }) {
 
 function Reading({ e }: { e: IsmEvent }) {
   // Weather sensors: render readings as chips.
-  if (e.tempC !== undefined || e.humidityPct !== undefined) {
+  const isWeather =
+    e.tempC !== undefined ||
+    e.humidityPct !== undefined ||
+    e.windSpeedKmh !== undefined ||
+    e.rainMm !== undefined ||
+    e.pressureHpa !== undefined ||
+    e.pressureKpa !== undefined;
+  if (isWeather) {
     return (
       <span className="flex flex-wrap items-center gap-1.5">
         {e.tempC !== undefined && (
@@ -124,6 +143,31 @@ function Reading({ e }: { e: IsmEvent }) {
           <Chip>
             <Droplets className="size-3 opacity-70" />
             {e.humidityPct}%
+          </Chip>
+        )}
+        {e.windSpeedKmh !== undefined && (
+          <Chip>
+            <Wind className="size-3 opacity-70" />
+            {e.windSpeedKmh.toFixed(1)} km/h
+            {e.windDirDeg !== undefined ? ` ${compass(e.windDirDeg)}` : ""}
+          </Chip>
+        )}
+        {e.rainMm !== undefined && (
+          <Chip>
+            <CloudRain className="size-3 opacity-70" />
+            {e.rainMm.toFixed(1)} mm
+          </Chip>
+        )}
+        {e.pressureHpa !== undefined && (
+          <Chip>
+            <Gauge className="size-3 opacity-70" />
+            {e.pressureHpa.toFixed(0)} hPa
+          </Chip>
+        )}
+        {e.pressureKpa !== undefined && (
+          <Chip>
+            <Gauge className="size-3 opacity-70" />
+            {e.pressureKpa.toFixed(0)} kPa
           </Chip>
         )}
         {e.batteryLow && (

@@ -348,6 +348,16 @@ export interface IsmEvent {
   humidityPct?: number;
   /** True when the device reports a low battery. */
   batteryLow?: boolean;
+  /** Wind speed in km/h, for weather stations that report it. */
+  windSpeedKmh?: number;
+  /** Wind direction in degrees (0 = N, clockwise). */
+  windDirDeg?: number;
+  /** Cumulative rain in mm (the running total the sensor reports). */
+  rainMm?: number;
+  /** Barometric pressure in hPa. */
+  pressureHpa?: number;
+  /** Tyre pressure in kPa, for TPMS sensors. */
+  pressureKpa?: number;
   /** How many times this identical packet repeated within the burst. */
   repeats: number;
   /** Burst signal level, dB above the noise floor. */
