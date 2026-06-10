@@ -8,7 +8,9 @@
     "dev:server": "bun --filter '@sdr/server' dev",
     "dev:web": "bun --filter '@sdr/web' dev",
     "build": "bun --filter '*' build",
-    "typecheck": "bun --filter '*' typecheck"
+    "typecheck": "bun --filter '*' typecheck",
+    "package": "bun run scripts/package.ts",
+    "package:all": "bun run scripts/package.ts bun-darwin-arm64 bun-darwin-x64 bun-linux-x64 bun-windows-x64"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14"

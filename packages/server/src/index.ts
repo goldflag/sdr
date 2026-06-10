@@ -6,6 +6,7 @@
 import type { Server, ServerWebSocket } from "bun";
 import type { ClientMessage } from "@sdr/shared";
 import { Radio } from "./session";
+import { EMBEDDED, HAS_EMBEDDED } from "./embedded";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const TOPIC = "radio";
@@ -35,6 +36,10 @@ server = Bun.serve({
     if (url.pathname === "/health") {
       return Response.json({ ok: true, clients: clientCount });
     }
+    // In a packaged binary, serve the embedded frontend; in dev this is empty
+    // and Vite serves the app, proxying /ws here.
+    const asset = staticResponse(url.pathname);
+    if (asset) return asset;
     return new Response("sdr server — connect a client to /ws", {
       headers: { "content-type": "text/plain" },
     });
@@ -78,4 +83,39 @@ server = Bun.serve({
   },
 });
 
-console.log(`[sdr] server listening on http://localhost:${PORT} (ws: /ws)`);
+const url = `http://localhost:${PORT}`;
+console.log(`[sdr] server listening on ${url} (ws: /ws)`);
+
+// Packaged binary: open the user's browser to the embedded UI on first launch.
+if (HAS_EMBEDDED && !process.env.SDR_NO_OPEN) {
+  console.log(`[sdr] opening ${url} …`);
+  openBrowser(url);
+}
+
+/** Serve an embedded frontend asset, with an SPA fallback to index.html. */
+function staticResponse(pathname: string): Response | null {
+  if (!HAS_EMBEDDED) return null;
+  const key = pathname === "/" ? "/index.html" : pathname;
+  let asset = EMBEDDED[key];
+  // Unknown path with no file extension → client-side route; serve the shell.
+  if (!asset && !key.slice(1).includes(".")) asset = EMBEDDED["/index.html"];
+  if (!asset) return null;
+  return new Response(Bun.file(asset.path), {
+    headers: { "content-type": asset.type },
+  });
+}
+
+/** Open a URL in the platform's default browser (best-effort). */
+function openBrowser(target: string) {
+  const cmd =
+    process.platform === "darwin"
+      ? ["open", target]
+      : process.platform === "win32"
+        ? ["cmd", "/c", "start", "", target]
+        : ["xdg-open", target];
+  try {
+    Bun.spawn(cmd, { stdout: "ignore", stderr: "ignore" });
+  } catch {
+    /* no opener available — the user can navigate manually */
+  }
+}
