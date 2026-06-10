@@ -455,10 +455,13 @@ export interface RadioState {
   aprs: boolean;
   /** Which enabled layer the dongle is sampling right now (round-robin), or null. */
   activeLayer: MapLayer | null;
-  /** When true the radio is decoding ISM-band OOK (rtl_433-style). */
+  /** When true the radio is decoding ISM-band sensors (via rtl_433). */
   ism: boolean;
   /** Selected ISM centre frequency in Hz. */
   ismFreqHz: number;
+  /** Whether the rtl_433 binary is installed on the server. The client disables
+   *  the ISM tab when false, since there is no built-in fallback decoder. */
+  ismAvailable: boolean;
 }
 
 export type ServerMessage =
@@ -647,4 +650,5 @@ export const DEFAULT_STATE: RadioState = {
   activeLayer: null,
   ism: false,
   ismFreqHz: ISM_FREQ_HZ,
+  ismAvailable: false,
 };

@@ -112,6 +112,9 @@ export class Radio {
   private stopping = false;
 
   constructor(private sinks: RadioSinks) {
+    // ISM decode is delegated to rtl_433; advertise whether it's installed so
+    // the client can disable the ISM tab when it isn't.
+    this.state.ismAvailable = IsmReceiver.available();
     this.manager = new RtlTcpManager();
     this.manager.on((e) => {
       if (e.type === "log") console.log(`[rtl_tcp] ${e.line}`);
@@ -176,6 +179,8 @@ export class Radio {
       this.broadcastState();
     });
     client.onIq((iq) => this.onIq(iq));
+    // Raw CU8 IQ is piped to rtl_433 while in ISM mode (feed() no-ops otherwise).
+    client.onRawIq((bytes) => this.ism.feed(bytes));
     client.onError((msg) => this.sinks.json({ type: "error", message: msg }));
     client.onClose(() => {
       this.state.running = false;
@@ -470,9 +475,10 @@ export class Radio {
     }
   }
 
-  /** Retune to the selected ISM band @ 250 kSPS and start OOK decoding. */
+  /** Retune to the selected ISM band @ 250 kSPS and start the rtl_433 decoder. */
   private enterIsm() {
     if (this.state.ism) return;
+    if (!this.state.ismAvailable) return; // rtl_433 not installed — nothing to do
     this.disableAllLayers(); // release the dongle from map mode
     this.scanner.stop();
     this.saveDecodeState();
@@ -482,7 +488,7 @@ export class Radio {
     s.sampleRate = ISM_SAMPLE_RATE;
     s.directSampling = DIRECT_SAMPLING.OFF;
     this.maxGain();
-    this.ism.reset();
+    this.ism.start(); // spawn rtl_433; raw IQ is fed via the onRawIq tap
     this.lastIsm = 0;
     this.applyReceiver();
   }
@@ -491,6 +497,7 @@ export class Radio {
   private exitIsm() {
     if (!this.state.ism) return;
     this.state.ism = false;
+    this.ism.stop(); // kill rtl_433
     this.restoreDecodeState();
     this.applyReceiver();
   }
@@ -641,7 +648,8 @@ export class Radio {
     }
 
     if (this.state.ism) {
-      this.ism.process(iq);
+      // Decoding happens in the rtl_433 child (fed raw CU8 via onRawIq); here we
+      // just publish its accumulated decodes on the broadcast cadence.
       const now = Date.now();
       if (now - this.lastIsm >= ISM_BROADCAST_MS) {
         this.lastIsm = now;

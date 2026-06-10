@@ -280,7 +280,11 @@ export default function App() {
         {/* Main column: view tabs + spectrum/waterfall or live ADS-B map */}
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center gap-3 border-b px-4 py-2">
-            <ViewTabs view={view} onChange={switchView} />
+            <ViewTabs
+              view={view}
+              onChange={switchView}
+              ismAvailable={state.ismAvailable}
+            />
             {view === "track" && (
               <span className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
                 <span>
@@ -462,34 +466,64 @@ function saveDisplay(d: DisplaySettings) {
 function ViewTabs({
   view,
   onChange,
+  ismAvailable,
 }: {
   view: View;
   onChange: (v: View) => void;
+  ismAvailable: boolean;
 }) {
-  const tabs: { id: View; label: string; icon: typeof Plane }[] = [
+  const tabs: {
+    id: View;
+    label: string;
+    icon: typeof Plane;
+    disabled?: boolean;
+    reason?: string;
+  }[] = [
     { id: "spectrum", label: "Spectrum", icon: AudioWaveform },
     { id: "track", label: "Map", icon: MapIcon },
-    { id: "ism", label: "ISM 433", icon: RadioReceiver },
+    {
+      id: "ism",
+      label: "ISM 433",
+      icon: RadioReceiver,
+      disabled: !ismAvailable,
+      reason: "Requires rtl_433 — install it (e.g. brew install rtl_433) and restart the server to decode ISM sensors.",
+    },
   ];
   return (
     <div className="flex items-center gap-0.5 rounded-md bg-muted/50 p-0.5">
       {tabs.map((t) => {
         const Icon = t.icon;
         const active = view === t.id;
-        return (
+        const tab = (
           <button
             key={t.id}
             type="button"
-            onClick={() => onChange(t.id)}
+            disabled={t.disabled}
+            onClick={() => !t.disabled && onChange(t.id)}
             className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-              active
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
+              t.disabled
+                ? "cursor-not-allowed text-muted-foreground/40"
+                : active
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
             }`}
           >
             <Icon className="size-3.5" />
             {t.label}
           </button>
+        );
+        if (!t.disabled) return tab;
+        // Disabled tab: a disabled <button> emits no pointer events, so wrap it
+        // in a span that carries the tooltip trigger and explains why.
+        return (
+          <Tooltip key={t.id}>
+            <TooltipTrigger asChild>
+              <span className="inline-flex" tabIndex={0}>
+                {tab}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{t.reason}</TooltipContent>
+          </Tooltip>
         );
       })}
     </div>
@@ -645,7 +679,7 @@ function StatusBar({
               ? "Decoding one band · markers update live"
               : "No layers enabled — pick Aircraft / Ships / APRS"
           : isIsm
-            ? "Decoding ISM-band OOK · rtl_433-style pulse analysis"
+            ? "Decoding ISM-band sensors via rtl_433"
             : "Click to tune · scroll to zoom · drag filter edges · ⌥-click to notch"}
       </span>
       <div className="flex items-center gap-4">

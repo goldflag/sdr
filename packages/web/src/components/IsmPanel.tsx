@@ -60,9 +60,9 @@ export function IsmPanel({ stats, ismFreqHz, send }: Props) {
 
         <p className="flex items-start gap-1.5 text-[11px] text-muted-foreground">
           <RadioReceiver className="mt-px size-3 shrink-0" />
-          Decodes on-off-keyed sensors: Acurite &amp; LaCrosse weather stations
-          (temp/humidity), plus EV1527 keyfobs and doorbells. Unrecognised bursts
-          are counted as “undecoded” and only shown raw on request.
+          Decoded by <span className="font-mono">rtl_433</span>: weather stations
+          (temp/humidity/wind/rain), TPMS, energy meters, remotes and 200+ other
+          devices on the tuned band.
         </p>
       </Section>
     </div>

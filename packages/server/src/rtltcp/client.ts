@@ -24,6 +24,7 @@ export class RtlTcpClient {
 
   private onHeaderCb?: (h: DongleHeader) => void;
   private onIqCb?: (iq: Float32Array) => void;
+  private onRawIqCb?: (iq: Uint8Array) => void;
   private onCloseCb?: () => void;
   private onErrorCb?: (msg: string) => void;
 
@@ -34,6 +35,11 @@ export class RtlTcpClient {
   }
   onIq(fn: (iq: Float32Array) => void) {
     this.onIqCb = fn;
+  }
+  /** Raw post-header CU8 bytes, untouched — for consumers (rtl_433) that want
+   *  the original interleaved uint8 stream rather than normalized floats. */
+  onRawIq(fn: (iq: Uint8Array) => void) {
+    this.onRawIqCb = fn;
   }
   onClose(fn: () => void) {
     this.onCloseCb = fn;
@@ -104,6 +110,9 @@ export class RtlTcpClient {
       this.onHeaderCb?.(this.header);
       data = merged.subarray(12);
     }
+
+    // Hand the raw CU8 bytes to any raw consumer (rtl_433) before normalizing.
+    if (data.length > 0) this.onRawIqCb?.(data);
 
     if (data.length === 0 || !this.onIqCb) return;
 
