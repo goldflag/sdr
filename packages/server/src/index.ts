@@ -4,7 +4,8 @@
 // last one leaves. In dev the Vite server proxies /ws here.
 
 import type { Server, ServerWebSocket } from "bun";
-import { PROTOCOL_VERSION, parseClientMessage } from "@sdr/shared";
+import { PROTOCOL_VERSION } from "@sdr/shared";
+import { parseClientMessage } from "@sdr/shared/validate";
 import { Radio } from "./session";
 import { EMBEDDED, HAS_EMBEDDED } from "./embedded";
 

@@ -3,11 +3,15 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./validate": "./src/validate.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "echo 'shared: type-only, nothing to build'",
     "dev": "echo 'shared: type-only'"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
   }
 }
