@@ -40,6 +40,12 @@ import { Nco } from "./dsp/nco";
 import { floatToInt16 } from "./dsp/resample";
 import { Scanner } from "./scanner";
 
+// A dongle/rtl_tcp failure while clients are connected triggers automatic
+// restarts with exponential backoff (1s, 2s, 4s … capped), giving up after a
+// few attempts so a genuinely unplugged dongle doesn't loop forever.
+const RECONNECT_MAX_ATTEMPTS = 6;
+const RECONNECT_MAX_DELAY_MS = 15_000;
+
 const FFT_INTERVAL_MS = 50; // ~20 fps
 const FFT_SIZE = 2048;
 const ADSB_BROADCAST_MS = 1000; // aircraft table refresh rate
@@ -110,6 +116,11 @@ export class Radio {
   > | null = null;
   private starting = false;
   private stopping = false;
+  // True between start() and stop(): the radio *should* be running, so an
+  // unexpected rtl_tcp exit or TCP drop schedules an automatic reconnect.
+  private desired = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
 
   constructor(private sinks: RadioSinks) {
     // ISM decode is delegated to rtl_433; advertise whether it's installed so
@@ -125,11 +136,10 @@ export class Radio {
         this.state.running = false;
         this.starting = false;
         // Don't surface an error for a stop we initiated (e.g. last client left).
-        if (!this.stopping) {
-          this.sinks.json({ type: "error", message: e.reason });
-        }
+        const expected = this.stopping;
         this.stopping = false;
         this.broadcastState();
+        if (!expected) this.scheduleReconnect(e.reason);
       }
     });
   }
@@ -142,15 +152,15 @@ export class Radio {
   }
 
   async start() {
-    if (this.state.running || this.starting) return;
-    this.starting = true;
-    await this.manager.start();
-    // rtl_tcp logs "listening..." to block-buffered stdout, so we don't wait
-    // for it — just connect, retrying until the TCP socket accepts.
-    await this.connectClient();
+    this.desired = true;
+    this.reconnectAttempts = 0;
+    this.clearReconnect();
+    await this.ensureStarted();
   }
 
   stop() {
+    this.desired = false;
+    this.clearReconnect();
     this.stopping = true;
     this.client?.close();
     this.client = null;
@@ -159,6 +169,48 @@ export class Radio {
     this.starting = false;
     this.deviceInfo = null;
     this.broadcastState();
+  }
+
+  private async ensureStarted() {
+    if (this.state.running || this.starting) return;
+    this.starting = true;
+    await this.manager.start();
+    // rtl_tcp logs "listening..." to block-buffered stdout, so we don't wait
+    // for it — just connect, retrying until the TCP socket accepts.
+    await this.connectClient();
+  }
+
+  private clearReconnect() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  /** After an unexpected rtl_tcp exit / TCP drop, retry with backoff. */
+  private scheduleReconnect(reason: string) {
+    if (!this.desired || this.reconnectTimer) return;
+    if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
+      this.desired = false;
+      this.sinks.json({
+        type: "error",
+        message: `${reason} — gave up after ${RECONNECT_MAX_ATTEMPTS} reconnect attempts; check the dongle and press start`,
+      });
+      return;
+    }
+    const delay = Math.min(
+      RECONNECT_MAX_DELAY_MS,
+      1000 * 2 ** this.reconnectAttempts,
+    );
+    this.reconnectAttempts++;
+    this.sinks.json({
+      type: "error",
+      message: `${reason} — reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts}/${RECONNECT_MAX_ATTEMPTS})`,
+    });
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.ensureStarted();
+    }, delay);
   }
 
   private async connectClient() {
@@ -176,6 +228,7 @@ export class Radio {
       this.applyAll();
       this.state.running = true;
       this.starting = false;
+      this.reconnectAttempts = 0; // healthy connection — reset the backoff
       this.broadcastState();
     });
     client.onIq((iq) => this.onIq(iq));
@@ -183,8 +236,13 @@ export class Radio {
     client.onRawIq((bytes) => this.ism.feed(bytes));
     client.onError((msg) => this.sinks.json({ type: "error", message: msg }));
     client.onClose(() => {
+      // Ignore closes from a superseded client (a reconnect already replaced it).
+      if (this.client && this.client !== client) return;
       this.state.running = false;
       this.broadcastState();
+      // The rtl_tcp process may still be alive (TCP-only drop) — ensureStarted
+      // skips the spawn in that case and just redials the socket.
+      this.scheduleReconnect("lost connection to rtl_tcp");
     });
     try {
       await client.connect();
@@ -192,6 +250,7 @@ export class Radio {
     } catch (err) {
       this.starting = false;
       this.sinks.json({ type: "error", message: (err as Error).message });
+      this.scheduleReconnect("could not connect to rtl_tcp");
     }
   }
 

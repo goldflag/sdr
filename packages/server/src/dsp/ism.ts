@@ -15,6 +15,14 @@ import { ISM_SAMPLE_RATE } from "@sdr/shared";
 
 const EVENT_LOG_MAX = 200; // bound the recent-decode log (the client caps too)
 
+// If rtl_433 dies (or its stdin pipe breaks) while ISM mode is on, respawn it
+// after a short delay instead of silently going dark. Rapid successive deaths
+// (bad args, broken install) stop after a few tries; a process that ran for a
+// while before dying resets the counter.
+const RESPAWN_DELAY_MS = 1000;
+const MAX_RAPID_RESTARTS = 3;
+const HEALTHY_RUN_MS = 30_000;
+
 /** rtl_433 invocation: CU8 from stdin, 250 kSPS, JSON out, per-decode level info.
  *  Override entirely with ISM_RTL433_ARGS (space-separated) for debugging — e.g.
  *  ISM_RTL433_ARGS="-r cu8:- -s 250000 -F json -F log -M level -v -v". */
@@ -41,6 +49,11 @@ export class IsmReceiver {
   private bursts = 0;
   private decoded = 0;
   private noise = -100;
+  // True between start() and stop(): an unexpected child death gets respawned.
+  private wantRunning = false;
+  private respawnTimer: ReturnType<typeof setTimeout> | null = null;
+  private rapidRestarts = 0;
+  private spawnedAt = 0;
 
   /** Absolute path to the rtl_433 binary, or null if it isn't installed. Reads
    *  the live PATH explicitly — Bun.which()/Bun.spawn() otherwise snapshot it at
@@ -80,32 +93,19 @@ export class IsmReceiver {
 
   /** Spawn rtl_433 reading raw CU8 from stdin. No-op if unavailable or running. */
   start() {
-    const bin = IsmReceiver.resolve();
-    if (this.proc || !bin) return;
+    this.wantRunning = true;
+    this.rapidRestarts = 0;
     this.reset();
-    const proc = Bun.spawn([bin, ...rtl433Args()], {
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "ignore",
-      onExit: (p, code, signal) => {
-        // stop() nulls this.proc before killing, so this.proc === p means the
-        // child exited on its own (crash / bad args). Release it so feed() stops
-        // writing to a dead pipe and a later start() can respawn — and surface it,
-        // since a silent failure here is indistinguishable from "no signal".
-        if (this.proc === p) {
-          this.proc = null;
-          this.sink = null;
-          console.warn(`[ism] rtl_433 exited unexpectedly (code=${code} signal=${signal})`);
-        }
-      },
-    });
-    this.proc = proc;
-    this.sink = proc.stdin;
-    void this.readLoop(proc);
+    this.spawn();
   }
 
   /** Stop rtl_433 and release the pipe. */
   stop() {
+    this.wantRunning = false;
+    if (this.respawnTimer) {
+      clearTimeout(this.respawnTimer);
+      this.respawnTimer = null;
+    }
     const proc = this.proc;
     this.proc = null;
     this.sink = null;
@@ -118,6 +118,51 @@ export class IsmReceiver {
     proc.kill();
   }
 
+  private spawn() {
+    const bin = IsmReceiver.resolve();
+    if (this.proc || !bin) return;
+    this.spawnedAt = Date.now();
+    const proc = Bun.spawn([bin, ...rtl433Args()], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "ignore",
+      onExit: (p, code, signal) => {
+        // stop() nulls this.proc before killing, so this.proc === p means the
+        // child exited on its own (crash / bad args). Release it so feed() stops
+        // writing to a dead pipe, surface it, and try to bring it back.
+        if (this.proc === p) {
+          this.proc = null;
+          this.sink = null;
+          console.warn(`[ism] rtl_433 exited unexpectedly (code=${code} signal=${signal})`);
+          this.maybeRespawn();
+        }
+      },
+    });
+    this.proc = proc;
+    this.sink = proc.stdin;
+    this.readLoop(proc).catch((err) =>
+      console.warn(`[ism] read loop error: ${err}`),
+    );
+  }
+
+  /** Respawn rtl_433 after an unexpected death, with a rapid-failure cap. */
+  private maybeRespawn() {
+    if (!this.wantRunning || this.respawnTimer) return;
+    // A child that ran healthily for a while earns a fresh restart budget.
+    if (Date.now() - this.spawnedAt > HEALTHY_RUN_MS) this.rapidRestarts = 0;
+    if (this.rapidRestarts >= MAX_RAPID_RESTARTS) {
+      console.warn(
+        `[ism] rtl_433 died ${MAX_RAPID_RESTARTS} times in a row — giving up until ISM is toggled again`,
+      );
+      return;
+    }
+    this.rapidRestarts++;
+    this.respawnTimer = setTimeout(() => {
+      this.respawnTimer = null;
+      if (this.wantRunning && !this.proc) this.spawn();
+    }, RESPAWN_DELAY_MS);
+  }
+
   /** Forward a raw CU8 IQ chunk from rtl_tcp to rtl_433's stdin. */
   feed(bytes: Uint8Array) {
     const sink = this.sink;
@@ -126,8 +171,14 @@ export class IsmReceiver {
       sink.write(bytes);
       sink.flush();
     } catch {
-      // The pipe went away — drop ISM until it is (re)started.
-      this.stop();
+      // The pipe broke (child died mid-write) — drop this child and respawn
+      // rather than leaving ISM silently dark until the user toggles it.
+      console.warn("[ism] pipe write failed — restarting rtl_433");
+      const proc = this.proc;
+      this.proc = null;
+      this.sink = null;
+      proc?.kill();
+      this.maybeRespawn();
     }
   }
 

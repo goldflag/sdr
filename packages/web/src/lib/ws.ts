@@ -18,6 +18,7 @@ import {
   type StationReport,
   type VesselReport,
   BinaryFrameType,
+  PROTOCOL_VERSION,
   decodeAudioFrame,
   decodeFftFrame,
   frameType,
@@ -25,6 +26,16 @@ import {
 
 type FftCb = (f: FftFrame) => void;
 type AudioCb = (f: AudioFrame) => void;
+
+// Reconnect with exponential backoff + jitter so a down/restarting server gets
+// a handful of quick retries, not a steady 1 Hz hammering from every open tab.
+const RECONNECT_BASE_MS = 500;
+const RECONNECT_MAX_MS = 15_000;
+const RECONNECT_JITTER_MS = 300;
+
+// Messages queued while disconnected are flushed on reconnect; cap the queue so
+// a long outage doesn't replay hundreds of stale control changes.
+const SEND_QUEUE_MAX = 64;
 
 export interface SignalState {
   channelDb: number;
@@ -76,6 +87,10 @@ export function useRadio() {
   useEffect(() => {
     let closed = false;
     let reconnectTimer: ReturnType<typeof setTimeout>;
+    let attempts = 0;
+    // Set on a version-mismatched hello; keeps the "reload the page" error from
+    // being cleared by the deviceInfo/state sync that follows it.
+    let protocolMismatch = false;
 
     const connect = () => {
       const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -84,6 +99,7 @@ export function useRadio() {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        attempts = 0;
         setConnected(true);
         setError(null);
         for (const m of sendQueue.current) ws.send(JSON.stringify(m));
@@ -91,12 +107,24 @@ export function useRadio() {
       };
       ws.onclose = () => {
         setConnected(false);
-        if (!closed) reconnectTimer = setTimeout(connect, 1000);
+        if (closed) return;
+        const delay =
+          Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** attempts) +
+          Math.random() * RECONNECT_JITTER_MS;
+        attempts++;
+        reconnectTimer = setTimeout(connect, delay);
       };
       ws.onerror = () => ws.close();
       ws.onmessage = (ev) => {
         if (typeof ev.data === "string") {
-          handleJson(JSON.parse(ev.data) as ServerMessage);
+          let msg: ServerMessage;
+          try {
+            msg = JSON.parse(ev.data) as ServerMessage;
+          } catch {
+            console.warn("[ws] dropping non-JSON server message");
+            return;
+          }
+          handleJson(msg);
           return;
         }
         const buf = ev.data as ArrayBuffer;
@@ -111,18 +139,31 @@ export function useRadio() {
             for (const cb of audioSubs.current) cb(f);
             break;
           }
+          default:
+            // A frame type this build doesn't know — likely a protocol bump.
+            console.warn(`[ws] unknown binary frame type ${frameType(buf)}`);
         }
       };
     };
 
     const handleJson = (msg: ServerMessage) => {
       switch (msg.type) {
+        case "hello":
+          protocolMismatch = msg.protocol !== PROTOCOL_VERSION;
+          if (protocolMismatch) {
+            setError(
+              `protocol mismatch (server v${msg.protocol}, this page v${PROTOCOL_VERSION}) — reload the page`,
+            );
+          }
+          break;
         case "state":
           setState(msg.state);
           break;
         case "deviceInfo":
           setDeviceInfo(msg.info);
-          setError(null); // a successful (re)connect clears any stale error
+          // A successful (re)connect clears any stale error — but never the
+          // protocol-mismatch warning, which only a reload fixes.
+          if (!protocolMismatch) setError(null);
           break;
         case "signal":
           setSignal({ channelDb: msg.channelDb, squelchOpen: msg.squelchOpen });
@@ -174,7 +215,10 @@ export function useRadio() {
   const send = useCallback((msg: ClientMessage) => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
-    else sendQueue.current.push(msg);
+    else {
+      sendQueue.current.push(msg);
+      if (sendQueue.current.length > SEND_QUEUE_MAX) sendQueue.current.shift();
+    }
   }, []);
 
   const subscribeFft = useCallback((cb: FftCb) => {

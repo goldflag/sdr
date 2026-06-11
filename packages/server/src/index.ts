@@ -4,7 +4,7 @@
 // last one leaves. In dev the Vite server proxies /ws here.
 
 import type { Server, ServerWebSocket } from "bun";
-import type { ClientMessage } from "@sdr/shared";
+import { PROTOCOL_VERSION, parseClientMessage } from "@sdr/shared";
 import { Radio } from "./session";
 import { EMBEDDED, HAS_EMBEDDED } from "./embedded";
 
@@ -12,15 +12,25 @@ const PORT = Number(process.env.PORT ?? 8787);
 const TOPIC = "radio";
 
 let server: Server<undefined>;
-let clientCount = 0;
+const clients = new Set<ServerWebSocket<undefined>>();
 let stopTimer: ReturnType<typeof setTimeout> | null = null;
 // Grace period before stopping the dongle once the last client leaves — rides
 // out React StrictMode remounts and page reloads without thrashing rtl_tcp.
 const STOP_GRACE_MS = 2500;
 
+// Binary frames (FFT + audio, ~260 KB/s) are disposable: a client that can't
+// drain its socket gets frames skipped rather than queued without bound, so one
+// stalled tab can't grow server memory until everyone's radio dies. ~2 s of
+// stream; small JSON status messages still always go out via publish.
+const MAX_BUFFERED_BYTES = 512 * 1024;
+
 const radio = new Radio({
   json: (msg) => server?.publish(TOPIC, JSON.stringify(msg)),
-  binary: (buf) => server?.publish(TOPIC, buf),
+  binary: (buf) => {
+    for (const ws of clients) {
+      if (ws.getBufferedAmount() < MAX_BUFFERED_BYTES) ws.send(buf);
+    }
+  },
 });
 
 server = Bun.serve({
@@ -34,7 +44,7 @@ server = Bun.serve({
         : new Response("websocket upgrade failed", { status: 400 });
     }
     if (url.pathname === "/health") {
-      return Response.json({ ok: true, clients: clientCount });
+      return Response.json({ ok: true, clients: clients.size });
     }
     // In a packaged binary, serve the embedded frontend; in dev this is empty
     // and Vite serves the app, proxying /ws here.
@@ -48,13 +58,15 @@ server = Bun.serve({
     perMessageDeflate: false,
     open(ws: ServerWebSocket<undefined>) {
       ws.subscribe(TOPIC);
-      clientCount++;
+      clients.add(ws);
       // A client returned within the grace period — cancel any pending stop.
       if (stopTimer) {
         clearTimeout(stopTimer);
         stopTimer = null;
       }
-      // Sync the newcomer with current state, then ensure the radio is running.
+      // Version handshake first, then sync the newcomer with current state and
+      // ensure the radio is running.
+      ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION }));
       const info = radio.getDeviceInfo();
       if (info) ws.send(JSON.stringify({ type: "deviceInfo", info }));
       ws.send(JSON.stringify({ type: "state", state: radio.getState() }));
@@ -62,21 +74,27 @@ server = Bun.serve({
     },
     message(_ws, message) {
       if (typeof message !== "string") return;
-      let msg: ClientMessage;
+      let parsed: unknown;
       try {
-        msg = JSON.parse(message) as ClientMessage;
+        parsed = JSON.parse(message);
       } catch {
+        console.warn(`[ws] dropping non-JSON message: ${preview(message)}`);
+        return;
+      }
+      const msg = parseClientMessage(parsed);
+      if (!msg) {
+        console.warn(`[ws] dropping malformed message: ${preview(message)}`);
         return;
       }
       radio.handle(msg);
     },
     close(ws: ServerWebSocket<undefined>) {
       ws.unsubscribe(TOPIC);
-      clientCount = Math.max(0, clientCount - 1);
-      if (clientCount === 0 && !stopTimer) {
+      clients.delete(ws);
+      if (clients.size === 0 && !stopTimer) {
         stopTimer = setTimeout(() => {
           stopTimer = null;
-          if (clientCount === 0) radio.stop();
+          if (clients.size === 0) radio.stop();
         }, STOP_GRACE_MS);
       }
     },
@@ -90,6 +108,11 @@ console.log(`[sdr] server listening on ${url} (ws: /ws)`);
 if (HAS_EMBEDDED && !process.env.SDR_NO_OPEN) {
   console.log(`[sdr] opening ${url} …`);
   openBrowser(url);
+}
+
+/** Truncate a raw message for log output. */
+function preview(s: string): string {
+  return s.length > 120 ? `${s.slice(0, 120)}…` : s;
 }
 
 /** Serve an embedded frontend asset, with an SPA fallback to index.html. */

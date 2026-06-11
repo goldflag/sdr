@@ -5,6 +5,14 @@
 //   whose first byte is a BinaryFrameType tag. Encoders/decoders live here so
 //   both ends agree on the exact byte layout.
 
+/**
+ * Bumped on any breaking change to the JSON messages or binary frame layouts.
+ * The server announces its version in a `hello` message on connect; a client
+ * built against a different version shows a "reload the page" error instead of
+ * silently misdecoding frames (e.g. a stale tab open across a server upgrade).
+ */
+export const PROTOCOL_VERSION = 1;
+
 // ---------------------------------------------------------------------------
 // Demodulation modes
 // ---------------------------------------------------------------------------
@@ -465,6 +473,8 @@ export interface RadioState {
 }
 
 export type ServerMessage =
+  /** First message on every connection; carries the server's protocol version. */
+  | { type: "hello"; protocol: number }
   | { type: "deviceInfo"; info: DeviceInfo }
   | { type: "state"; state: RadioState }
   /** Channel signal level in dB, for squelch UI / S-meter. */
