@@ -29,6 +29,7 @@ import {
   AudioControl,
   LAYER_LABEL,
   LayerToggle,
+  RailToggle,
   StatusBar,
   ViewTabs,
 } from "@/components/AppChrome";
@@ -43,7 +44,7 @@ export default function App() {
   const radio = useRadio();
   const audio = useAudioPlayer(radio.subscribeAudio);
   const ui = useUi();
-  const { view, layers, selected, receiverRef, display } = ui;
+  const { view, layers, selected, receiverRef, display, railOpen } = ui;
   const bm = useBookmarks();
 
   const state = radio.state ?? DEFAULT_STATE;
@@ -253,14 +254,21 @@ export default function App() {
               </span>
             )}
             {view === "spectrum" && (
-              <AudioControl
-                running={audio.running}
-                volume={audio.volume}
-                muted={audio.muted}
-                onVolume={audio.changeVolume}
-                onToggleMute={audio.toggleMute}
-                onEnable={audio.enable}
-              />
+              <>
+                <AudioControl
+                  running={audio.running}
+                  volume={audio.volume}
+                  muted={audio.muted}
+                  onVolume={audio.changeVolume}
+                  onToggleMute={audio.toggleMute}
+                  onEnable={audio.enable}
+                />
+                <RailToggle
+                  open={railOpen}
+                  transcribing={state.transcribe}
+                  onToggle={ui.toggleRail}
+                />
+              </>
             )}
           </div>
           {view === "spectrum" ? (
@@ -327,7 +335,7 @@ export default function App() {
 
         {/* Read rail — decoded output (RDS, transcript), kept apart from the
             control rail so live data never scrolls away behind settings. */}
-        {view === "spectrum" && (
+        {view === "spectrum" && railOpen && (
           <aside className="flex w-[300px] shrink-0 flex-col border-l bg-sidebar">
             <RdsPanel
               station={radio.rdsStation}
