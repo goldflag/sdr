@@ -97,9 +97,13 @@ export function Vfo({ state, send }: Props) {
         {MODES.map((m) => (
           <Tooltip key={m}>
             <TooltipTrigger asChild>
+              {/* Selected state keys off aria-checked, not data-[state=on]: the
+                  TooltipTrigger asChild wrapper overwrites data-state with the
+                  tooltip's own open/closed state, which silently killed the
+                  highlight. aria-checked survives the slot merge. */}
               <ToggleGroupItem
                 value={m}
-                className="px-3 font-mono text-xs data-[state=on]:bg-primary data-[state=on]:text-primary-foreground"
+                className="px-3 font-mono text-xs aria-checked:bg-primary aria-checked:text-primary-foreground aria-checked:hover:bg-primary aria-checked:hover:text-primary-foreground"
               >
                 {m}
               </ToggleGroupItem>
