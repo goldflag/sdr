@@ -2,9 +2,10 @@
 // heading-rotated, altitude-colored) and vessel (heading-rotated ship marker)
 // on a dark OpenLayers/OSM map, with fading by age, trails, an optional receiver
 // marker + range rings, a click-to-select detail popup, and table<->map
-// selection linking.
+// selection linking. Icons live in lib/map-icons, dead-reckoning in lib/motion,
+// settings/persistence in lib/map-settings, and the chrome in MapChrome.
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AircraftReport,
   StationReport,
@@ -13,8 +14,6 @@ import type {
 import OLMap from "ol/Map";
 import View from "ol/View";
 import TileLayer from "ol/layer/Tile";
-import OSM from "ol/source/OSM";
-import XYZ from "ol/source/XYZ";
 import VectorLayer from "ol/layer/Vector";
 import VectorSource from "ol/source/Vector";
 import Feature from "ol/Feature";
@@ -25,7 +24,6 @@ import { circular } from "ol/geom/Polygon";
 import { createEmpty, extend, isEmpty } from "ol/extent";
 import { fromLonLat, toLonLat } from "ol/proj";
 import {
-  Icon,
   Style,
   Text,
   Fill,
@@ -40,7 +38,6 @@ import {
   Plus,
   Settings2,
 } from "lucide-react";
-import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -49,15 +46,37 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
-import { categoryInfo, icaoInfo, type AircraftKind } from "@/lib/icao";
 import {
-  aprsKind,
-  aprsColor,
-  aprsRotates,
-  aprsKindLabel,
-  type AprsKind,
-} from "@/lib/aprs";
+  type CursorReadout,
+  MapLegend,
+  MapReadouts,
+  MapSettingsPanel,
+  MapToolButton,
+  TargetPopup,
+} from "@/components/MapChrome";
+import { categoryInfo } from "@/lib/icao";
+import { aprsKind, aprsColor, aprsRotates } from "@/lib/aprs";
+import {
+  aircraftLabel,
+  opacityForAge,
+  stationMapLabel,
+  vesselMapLabel,
+} from "@/lib/map-labels";
+import { altColor, aprsIcon, icon, shipIcon, vesselColor } from "@/lib/map-icons";
+import {
+  type MotionState,
+  MAX_EXTRAPOLATE_S,
+  MOTION_CORRECT_MS,
+  motionCoord,
+  predictLonLat,
+} from "@/lib/motion";
+import {
+  type BasemapId,
+  type MapSettings,
+  BASEMAPS,
+  loadMapSettings,
+  saveMapSettings,
+} from "@/lib/map-settings";
 import { distanceNm, bearing } from "@/lib/geo";
 import "ol/ol.css";
 
@@ -72,401 +91,6 @@ interface Props {
 }
 
 const MAX_TRAIL = 60; // points kept per aircraft trail
-const STALE_S = 60;
-
-type BasemapId = "dark" | "light" | "satellite" | "terrain" | "minimal";
-type LabelMode = "none" | "selected" | "id" | "idAlt" | "idSpeed";
-
-interface MapSettings {
-  basemap: BasemapId;
-  labelMode: LabelMode;
-  trails: boolean;
-  rangeRings: boolean;
-  receiver: boolean;
-  legend: boolean;
-  readouts: boolean;
-  ageFade: boolean;
-}
-
-const BASEMAPS: {
-  id: BasemapId;
-  label: string;
-  className?: string;
-  source: () => OSM | XYZ;
-}[] = [
-  {
-    id: "dark",
-    label: "Dark OSM",
-    className: "ol-basemap-dark",
-    source: () => new OSM(),
-  },
-  { id: "light", label: "Light OSM", source: () => new OSM() },
-  {
-    id: "satellite",
-    label: "Satellite",
-    source: () =>
-      new XYZ({
-        url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attributions: "Tiles © Esri",
-        maxZoom: 19,
-      }),
-  },
-  {
-    id: "terrain",
-    label: "Terrain",
-    source: () =>
-      new XYZ({
-        url: "https://{a-c}.tile.opentopomap.org/{z}/{x}/{y}.png",
-        attributions: "Map data © OpenStreetMap contributors, SRTM | OpenTopoMap",
-        maxZoom: 17,
-      }),
-  },
-  {
-    id: "minimal",
-    label: "Minimal",
-    className: "ol-basemap-minimal",
-    source: () =>
-      new XYZ({
-        url: "https://{a-d}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}.png",
-        attributions: "© OpenStreetMap contributors © CARTO",
-        maxZoom: 20,
-      }),
-  },
-];
-
-const LABEL_MODES: { id: LabelMode; label: string }[] = [
-  { id: "idAlt", label: "ID + altitude" },
-  { id: "id", label: "ID only" },
-  { id: "idSpeed", label: "ID + speed" },
-  { id: "selected", label: "Selected only" },
-  { id: "none", label: "None" },
-];
-
-const DEFAULT_MAP_SETTINGS: MapSettings = {
-  basemap: "dark",
-  labelMode: "idAlt",
-  trails: true,
-  rangeRings: true,
-  receiver: true,
-  legend: true,
-  readouts: true,
-  ageFade: true,
-};
-
-const MAP_SETTINGS_KEY = "sdr.map.settings";
-
-function loadMapSettings(): MapSettings {
-  try {
-    const raw = localStorage.getItem(MAP_SETTINGS_KEY);
-    if (!raw) return DEFAULT_MAP_SETTINGS;
-    const v = JSON.parse(raw);
-    return {
-      ...DEFAULT_MAP_SETTINGS,
-      ...v,
-      basemap: isBasemap(v?.basemap) ? v.basemap : DEFAULT_MAP_SETTINGS.basemap,
-      labelMode: isLabelMode(v?.labelMode)
-        ? v.labelMode
-        : DEFAULT_MAP_SETTINGS.labelMode,
-    };
-  } catch {
-    return DEFAULT_MAP_SETTINGS;
-  }
-}
-
-function saveMapSettings(settings: MapSettings) {
-  try {
-    localStorage.setItem(MAP_SETTINGS_KEY, JSON.stringify(settings));
-  } catch {
-    /* storage unavailable */
-  }
-}
-
-function isBasemap(v: unknown): v is BasemapId {
-  return BASEMAPS.some((b) => b.id === v);
-}
-
-function isLabelMode(v: unknown): v is LabelMode {
-  return LABEL_MODES.some((m) => m.id === v);
-}
-
-// --- marker icons ----------------------------------------------------------
-
-const SHAPES: Record<AircraftKind, (c: string) => string> = {
-  plane: (c) => planeSvg(c, 30),
-  heavy: (c) => planeSvg(c, 36),
-  light: (c) => planeSvg(c, 22),
-  heli: (c) =>
-    svg(
-      28,
-      `<circle cx="12" cy="12" r="3.2" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>` +
-        `<line x1="3" y1="3" x2="21" y2="21" stroke="${c}" stroke-width="1.6"/>` +
-        `<line x1="21" y1="3" x2="3" y2="21" stroke="${c}" stroke-width="1.6"/>`,
-    ),
-  ground: (c) =>
-    svg(
-      20,
-      `<rect x="7" y="7" width="10" height="10" rx="2" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>`,
-    ),
-};
-
-function svg(size: number, body: string): string {
-  return (
-    "data:image/svg+xml;utf8," +
-    encodeURIComponent(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24">${body}</svg>`,
-    )
-  );
-}
-
-function planeSvg(color: string, size: number): string {
-  return svg(
-    size,
-    `<path d="M12 2 L12.9 9 L21 14 L21 15.8 L12.9 13 L12.9 19 L15.5 20.8 L15.5 22 L12 20.9 L8.5 22 L8.5 20.8 L11.1 19 L11.1 13 L3 15.8 L3 14 L11.1 9 Z" ` +
-      `fill="${color}" stroke="#0b0f1a" stroke-width="0.8" stroke-linejoin="round"/>`,
-  );
-}
-
-// A fresh Icon per update is cheap: OpenLayers caches the decoded image by src,
-// so only rotation/opacity vary per aircraft.
-function icon(kind: AircraftKind, color: string, rotation: number, opacity: number) {
-  return new Icon({
-    src: SHAPES[kind](color),
-    rotation,
-    opacity,
-    rotateWithView: true,
-  });
-}
-
-// Ship marker: a stylised hull pointing "up" (rotated to heading/course).
-function shipSvg(color: string): string {
-  return svg(
-    22,
-    `<path d="M12 2 C14 6 15 9 15 14 L15 19 C15 20.5 13.7 21.5 12 21.5 C10.3 21.5 9 20.5 9 19 L9 14 C9 9 10 6 12 2 Z" ` +
-      `fill="${color}" stroke="#0b0f1a" stroke-width="0.9" stroke-linejoin="round"/>`,
-  );
-}
-
-function shipIcon(color: string, rotation: number, opacity: number) {
-  return new Icon({ src: shipSvg(color), rotation, opacity, rotateWithView: true });
-}
-
-// Colour a vessel by speed over ground: stationary → slate, fast → warm.
-function vesselColor(sog?: number): string {
-  if (sog == null) return "#94a3b8";
-  if (sog < 0.5) return "#64748b"; // moored / anchored
-  if (sog < 7) return "#2dd4bf"; // typical transit
-  if (sog < 15) return "#38bdf8";
-  return "#a78bfa"; // fast craft
-}
-
-// APRS station markers: a small glyph per symbol kind. Vehicles/aircraft point
-// "up" so they can be rotated to course; fixed stations stay upright.
-const APRS_SHAPES: Record<AprsKind, (c: string) => string> = {
-  car: (c) =>
-    svg(
-      18,
-      `<rect x="8" y="3" width="8" height="18" rx="2.5" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>` +
-        `<rect x="9.5" y="5" width="5" height="4" rx="1" fill="#0b0f1a" opacity="0.5"/>`,
-    ),
-  truck: (c) =>
-    svg(
-      18,
-      `<rect x="8" y="2" width="8" height="20" rx="1.5" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>` +
-        `<rect x="9" y="3.5" width="6" height="5" rx="1" fill="#0b0f1a" opacity="0.5"/>`,
-    ),
-  bike: (c) =>
-    svg(
-      14,
-      `<circle cx="12" cy="12" r="4" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>`,
-    ),
-  person: (c) =>
-    svg(
-      16,
-      `<circle cx="12" cy="7" r="2.6" fill="${c}" stroke="#0b0f1a" stroke-width="0.7"/>` +
-        `<path d="M7 21 C7 15 9 13 12 13 C15 13 17 15 17 21 Z" fill="${c}" stroke="#0b0f1a" stroke-width="0.7"/>`,
-    ),
-  home: (c) =>
-    svg(
-      18,
-      `<path d="M12 3 L21 11 L18 11 L18 21 L6 21 L6 11 L3 11 Z" fill="${c}" stroke="#0b0f1a" stroke-width="0.8" stroke-linejoin="round"/>`,
-    ),
-  wx: (c) =>
-    svg(
-      18,
-      `<circle cx="12" cy="12" r="8" fill="none" stroke="${c}" stroke-width="2.2"/>` +
-        `<circle cx="12" cy="12" r="2.5" fill="${c}"/>`,
-    ),
-  balloon: (c) =>
-    svg(
-      18,
-      `<circle cx="12" cy="10" r="7" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>` +
-        `<line x1="12" y1="17" x2="12" y2="22" stroke="${c}" stroke-width="1.4"/>`,
-    ),
-  boat: (c) => shipSvg(c),
-  aircraft: (c) => planeSvg(c, 24),
-  digi: (c) =>
-    svg(
-      18,
-      `<path d="M12 3 L20 12 L12 21 L4 12 Z" fill="${c}" stroke="#0b0f1a" stroke-width="0.9" stroke-linejoin="round"/>`,
-    ),
-  phone: (c) =>
-    svg(
-      16,
-      `<rect x="8.5" y="3" width="7" height="18" rx="2" fill="${c}" stroke="#0b0f1a" stroke-width="0.8"/>`,
-    ),
-  dot: (c) =>
-    svg(
-      14,
-      `<circle cx="12" cy="12" r="5" fill="${c}" stroke="#0b0f1a" stroke-width="0.9"/>`,
-    ),
-};
-
-function aprsIcon(
-  kind: AprsKind,
-  color: string,
-  rotation: number,
-  opacity: number,
-) {
-  return new Icon({
-    src: APRS_SHAPES[kind](color),
-    rotation,
-    opacity,
-    rotateWithView: true,
-  });
-}
-
-function altColor(alt?: number): string {
-  if (alt == null) return "#9ca3af";
-  const t = Math.min(1, Math.max(0, alt / 40000));
-  const stops: [number, string][] = [
-    [0, "#22d3ee"],
-    [0.5, "#34d399"],
-    [0.8, "#fbbf24"],
-    [1, "#f87171"],
-  ];
-  for (let i = 1; i < stops.length; i++) if (t <= stops[i]![0]) return stops[i]![1];
-  return "#f87171";
-}
-
-function targetBaseId(a: AircraftReport): string {
-  return (
-    a.callsign?.trim() || icaoInfo(a.icao).registration || a.icao.toUpperCase()
-  );
-}
-
-function aircraftLabel(
-  a: AircraftReport,
-  mode: LabelMode,
-  selected: boolean,
-  zoom: number,
-): string {
-  if (!shouldShowLabel(mode, selected, zoom)) return "";
-  const id = targetBaseId(a);
-  if (mode === "idSpeed" && a.speed != null) return `${id}\n${a.speed} kt`;
-  if (mode === "idAlt" && a.altitude != null) {
-    return `${id}\n${Math.round(a.altitude / 100) * 100} ft`;
-  }
-  return id;
-}
-
-function vesselMapLabel(
-  v: VesselReport,
-  mode: LabelMode,
-  selected: boolean,
-  zoom: number,
-): string {
-  if (!shouldShowLabel(mode, selected, zoom)) return "";
-  const id = v.name?.trim() || v.mmsi;
-  if (mode === "idSpeed" && v.sog != null) return `${id}\n${v.sog.toFixed(1)} kt`;
-  return id;
-}
-
-function stationMapLabel(
-  s: StationReport,
-  mode: LabelMode,
-  selected: boolean,
-  zoom: number,
-): string {
-  if (!shouldShowLabel(mode, selected, zoom)) return "";
-  if (mode === "idAlt" && s.altitude != null) {
-    return `${s.call}\n${s.altitude.toLocaleString()} ft`;
-  }
-  if (mode === "idSpeed" && s.speed != null) return `${s.call}\n${s.speed} kt`;
-  return s.call;
-}
-
-function shouldShowLabel(mode: LabelMode, selected: boolean, zoom: number): boolean {
-  if (mode === "none") return false;
-  if (mode === "selected") return selected;
-  if (selected) return true;
-  return zoom >= 6.4;
-}
-
-function opacityForAge(seen: number, floor: number, ageFade: boolean): number {
-  return ageFade ? Math.max(floor, 1 - seen / STALE_S) : 1;
-}
-
-// --- smooth motion (dead reckoning) ----------------------------------------
-//
-// ADS-B position fixes land every few seconds, so markers would otherwise jump.
-// Between fixes we extrapolate each aircraft forward from its last reported
-// position along its heading at its ground speed, every animation frame. When a
-// fresh fix arrives we don't snap to it: we record the small offset between
-// where the marker is and where the new fix predicts, then bleed that offset off
-// over MOTION_CORRECT_MS so the path stays continuous.
-
-const MOTION_CORRECT_MS = 700; // ease a position correction over this window
-const MAX_EXTRAPOLATE_S = 8; // cap dead reckoning so a stalled feed can't fling markers
-const KNOTS_TO_MS = 0.514444;
-
-interface MotionState {
-  lat: number;
-  lon: number;
-  speed: number; // knots; 0 = stationary/unknown -> no extrapolation
-  heading: number; // degrees
-  epoch: number; // client ms the reported position was valid
-  corr: [number, number]; // residual mercator offset, bled off after a correction
-  corrEpoch: number; // client ms the correction was applied
-}
-
-// Move a lat/lon forward by distM metres along a compass bearing (great-circle).
-function projectLatLon(
-  lat: number,
-  lon: number,
-  bearingDeg: number,
-  distM: number,
-): [number, number] {
-  const R = 6378137;
-  const d = distM / R;
-  const br = (bearingDeg * Math.PI) / 180;
-  const la1 = (lat * Math.PI) / 180;
-  const lo1 = (lon * Math.PI) / 180;
-  const la2 = Math.asin(
-    Math.sin(la1) * Math.cos(d) + Math.cos(la1) * Math.sin(d) * Math.cos(br),
-  );
-  const lo2 =
-    lo1 +
-    Math.atan2(
-      Math.sin(br) * Math.sin(d) * Math.cos(la1),
-      Math.cos(d) - Math.sin(la1) * Math.sin(la2),
-    );
-  return [(lo2 * 180) / Math.PI, (la2 * 180) / Math.PI];
-}
-
-function predictLonLat(m: MotionState, now: number): [number, number] {
-  if (m.speed <= 0.5) return [m.lon, m.lat];
-  const elapsed = Math.min((now - m.epoch) / 1000, MAX_EXTRAPOLATE_S);
-  if (elapsed <= 0) return [m.lon, m.lat];
-  return projectLatLon(m.lat, m.lon, m.heading, m.speed * KNOTS_TO_MS * elapsed);
-}
-
-// Rendered mercator coordinate: extrapolated position + the decaying correction.
-function motionCoord(m: MotionState, now: number): number[] {
-  const [lon, lat] = predictLonLat(m, now);
-  const merc = fromLonLat([lon, lat]);
-  const k = Math.max(0, 1 - (now - m.corrEpoch) / MOTION_CORRECT_MS);
-  return [merc[0]! + m.corr[0] * k, merc[1]! + m.corr[1] * k];
-}
 
 export function AdsbMap({
   aircraft = [],
@@ -520,12 +144,7 @@ export function AdsbMap({
   const [followSelected, setFollowSelected] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [zoom, setZoom] = useState(4);
-  const [cursor, setCursor] = useState<{
-    lat: number;
-    lon: number;
-    dist: number | null;
-    brg: number | null;
-  } | null>(null);
+  const [cursor, setCursor] = useState<CursorReadout | null>(null);
 
   const setMapSettings = (patch: Partial<MapSettings>) => {
     setSettings((current) => {
@@ -1171,8 +790,6 @@ export function AdsbMap({
     }
   }, [selectedAircraft, selectedVessel, selectedStation]);
 
-  const sel = selectedAircraft;
-  const info = sel ? icaoInfo(sel.icao) : null;
   const target = selectedAircraft ?? selectedVessel ?? selectedStation;
   const dist =
     target?.lat != null && refLat != null && refLon != null
@@ -1267,284 +884,14 @@ export function AdsbMap({
           target ? "" : "hidden"
         }`}
       >
-        {sel && (
-          <>
-            <div className="mb-1 flex items-center justify-between gap-2">
-              <span className="font-mono text-xs font-semibold text-foreground">
-                {sel.callsign?.trim() || info?.registration || sel.icao.toUpperCase()}
-              </span>
-              {info?.flag && <span className="text-sm">{info.flag}</span>}
-            </div>
-            <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono text-muted-foreground">
-              <Row k="ICAO" v={sel.icao.toUpperCase()} />
-              {info?.registration && <Row k="Reg" v={info.registration} />}
-              <Row k="Cat" v={categoryInfo(sel.category).label} />
-              <Row k="Alt" v={sel.altitude != null ? `${sel.altitude.toLocaleString()} ft` : "—"} />
-              <Row k="Spd" v={sel.speed != null ? `${sel.speed} kt` : "—"} />
-              <Row k="Hdg" v={sel.heading != null ? `${sel.heading}°` : "—"} />
-              <Row k="V/S" v={sel.vertRate != null ? `${sel.vertRate} fpm` : "—"} />
-              {dist != null && <Row k="Dist" v={`${dist.toFixed(0)} NM`} />}
-              {brg != null && <Row k="Brg" v={`${brg.toFixed(0)}°`} />}
-              <Row k="Sig" v={sel.rssi != null ? `${sel.rssi} dB` : "—"} />
-            </dl>
-          </>
-        )}
-        {!sel && selectedVessel && (
-          <>
-            <div className="mb-1 flex items-center justify-between gap-2">
-              <span className="font-mono text-xs font-semibold text-foreground">
-                {selectedVessel.name?.trim() || selectedVessel.mmsi}
-              </span>
-              {selectedVessel.channel && (
-                <span className="text-[10px] text-muted-foreground">
-                  ch {selectedVessel.channel}
-                </span>
-              )}
-            </div>
-            <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono text-muted-foreground">
-              <Row k="MMSI" v={selectedVessel.mmsi} />
-              {selectedVessel.callsign && <Row k="Call" v={selectedVessel.callsign} />}
-              <Row k="Type" v={selectedVessel.shipType ?? (selectedVessel.classB ? "Class B" : "—")} />
-              <Row k="SOG" v={selectedVessel.sog != null ? `${selectedVessel.sog.toFixed(1)} kt` : "—"} />
-              <Row k="COG" v={selectedVessel.cog != null ? `${selectedVessel.cog.toFixed(0)}°` : "—"} />
-              <Row k="Hdg" v={selectedVessel.heading != null ? `${selectedVessel.heading}°` : "—"} />
-              {selectedVessel.navStatus && <Row k="Status" v={selectedVessel.navStatus} />}
-              {dist != null && <Row k="Dist" v={`${dist.toFixed(0)} NM`} />}
-              {brg != null && <Row k="Brg" v={`${brg.toFixed(0)}°`} />}
-              <Row k="Sig" v={selectedVessel.rssi != null ? `${selectedVessel.rssi} dB` : "—"} />
-            </dl>
-          </>
-        )}
-        {!sel && !selectedVessel && selectedStation && (
-          <>
-            <div className="mb-1 flex items-center justify-between gap-2">
-              <span className="font-mono text-xs font-semibold text-foreground">
-                {selectedStation.call}
-              </span>
-              <span className="text-[10px] text-muted-foreground">
-                {aprsKindLabel(aprsKind(selectedStation.symbol))}
-              </span>
-            </div>
-            <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono text-muted-foreground">
-              <Row
-                k="Spd"
-                v={selectedStation.speed != null ? `${selectedStation.speed} kt` : "—"}
-              />
-              <Row
-                k="Crs"
-                v={selectedStation.course != null ? `${selectedStation.course}°` : "—"}
-              />
-              <Row
-                k="Alt"
-                v={
-                  selectedStation.altitude != null
-                    ? `${selectedStation.altitude.toLocaleString()} ft`
-                    : "—"
-                }
-              />
-              {dist != null && <Row k="Dist" v={`${dist.toFixed(0)} NM`} />}
-              {brg != null && <Row k="Brg" v={`${brg.toFixed(0)}°`} />}
-            </dl>
-            {selectedStation.via && (
-              <div className="mt-1 truncate font-mono text-[10px] text-muted-foreground/80">
-                via {selectedStation.via}
-              </div>
-            )}
-            {selectedStation.comment && (
-              <div className="mt-1 text-[10px] text-foreground/75">
-                {selectedStation.comment}
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function MapToolButton({
-  label,
-  onClick,
-  disabled,
-  pressed,
-  children,
-}: {
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-  pressed?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <Button
-      size="icon-sm"
-      variant={pressed ? "secondary" : "ghost"}
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={label}
-      aria-pressed={pressed}
-      title={label}
-      className="border-0"
-    >
-      {children}
-    </Button>
-  );
-}
-
-function MapSettingsPanel({
-  settings,
-  onChange,
-}: {
-  settings: MapSettings;
-  onChange: (patch: Partial<MapSettings>) => void;
-}) {
-  return (
-    <div className="w-56 rounded-md border bg-popover/95 p-2 text-xs backdrop-blur">
-      <div className="mb-2 grid gap-1.5">
-        <Label className="text-[11px] text-muted-foreground">Labels</Label>
-        <Select
-          value={settings.labelMode}
-          onValueChange={(v) => onChange({ labelMode: v as LabelMode })}
-        >
-          <SelectTrigger className="h-7 w-full px-2 font-mono text-[11px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent align="end">
-            {LABEL_MODES.map((m) => (
-              <SelectItem key={m.id} value={m.id}>
-                {m.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-
-      <div className="grid gap-2">
-        <MapSwitch
-          label="Trails"
-          checked={settings.trails}
-          onCheckedChange={(trails) => onChange({ trails })}
-        />
-        <MapSwitch
-          label="Range rings"
-          checked={settings.rangeRings}
-          onCheckedChange={(rangeRings) => onChange({ rangeRings })}
-        />
-        <MapSwitch
-          label="Receiver"
-          checked={settings.receiver}
-          onCheckedChange={(receiver) => onChange({ receiver })}
-        />
-        <MapSwitch
-          label="Legend"
-          checked={settings.legend}
-          onCheckedChange={(legend) => onChange({ legend })}
-        />
-        <MapSwitch
-          label="Readouts"
-          checked={settings.readouts}
-          onCheckedChange={(readouts) => onChange({ readouts })}
-        />
-        <MapSwitch
-          label="Age fade"
-          checked={settings.ageFade}
-          onCheckedChange={(ageFade) => onChange({ ageFade })}
+        <TargetPopup
+          aircraft={selectedAircraft}
+          vessel={selectedVessel}
+          station={selectedStation}
+          dist={dist}
+          brg={brg}
         />
       </div>
     </div>
-  );
-}
-
-function MapSwitch({
-  label,
-  checked,
-  onCheckedChange,
-}: {
-  label: string;
-  checked: boolean;
-  onCheckedChange: (checked: boolean) => void;
-}) {
-  return (
-    <Label className="flex items-center justify-between gap-3 text-[11px] text-foreground/80">
-      <span>{label}</span>
-      <Switch size="sm" checked={checked} onCheckedChange={onCheckedChange} />
-    </Label>
-  );
-}
-
-function MapLegend() {
-  return (
-    <div className="pointer-events-none absolute bottom-3 left-3 z-10 w-52 rounded-md border bg-popover/95 p-2 font-mono text-[10px] text-muted-foreground backdrop-blur">
-      <div className="mb-1 flex items-center justify-between">
-        <span>Altitude</span>
-        <span>ft</span>
-      </div>
-      <div className="h-2 rounded-sm bg-[linear-gradient(90deg,#22d3ee,#34d399,#fbbf24,#f87171)]" />
-      <div className="mt-1 flex justify-between tabular-nums">
-        <span>0</span>
-        <span>20k</span>
-        <span>32k</span>
-        <span>40k+</span>
-      </div>
-      <div className="mt-2 grid grid-cols-3 gap-1 text-[9px]">
-        <LegendChip color="#22d3ee" label="ADS-B" />
-        <LegendChip color="#2dd4bf" label="AIS" />
-        <LegendChip color="#a78bfa" label="APRS" />
-      </div>
-    </div>
-  );
-}
-
-function LegendChip({ color, label }: { color: string; label: string }) {
-  return (
-    <span className="flex items-center gap-1">
-      <span
-        className="size-2 rounded-full ring-1 ring-background"
-        style={{ backgroundColor: color }}
-      />
-      {label}
-    </span>
-  );
-}
-
-function MapReadouts({
-  cursor,
-  zoom,
-}: {
-  cursor: { lat: number; lon: number; dist: number | null; brg: number | null } | null;
-  zoom: number;
-}) {
-  return (
-    <div className="pointer-events-none absolute bottom-3 right-3 z-10 flex max-w-[calc(100%-16rem)] flex-wrap justify-end gap-x-3 gap-y-1 rounded-md border bg-popover/95 px-2 py-1.5 font-mono text-[10px] text-muted-foreground backdrop-blur">
-      <Readout label="Z" value={zoom.toFixed(1)} />
-      <Readout label="LAT" value={cursor ? cursor.lat.toFixed(5) : "—"} />
-      <Readout label="LON" value={cursor ? cursor.lon.toFixed(5) : "—"} />
-      <Readout
-        label="DIST"
-        value={cursor?.dist != null ? `${cursor.dist.toFixed(1)} NM` : "—"}
-      />
-      <Readout
-        label="BRG"
-        value={cursor?.brg != null ? `${cursor.brg.toFixed(0)}°` : "—"}
-      />
-    </div>
-  );
-}
-
-function Readout({ label, value }: { label: string; value: string }) {
-  return (
-    <span className="flex items-center gap-1 tabular-nums">
-      <span className="text-muted-foreground/60">{label}</span>
-      <span className="text-foreground/80">{value}</span>
-    </span>
-  );
-}
-
-function Row({ k, v }: { k: string; v: string }) {
-  return (
-    <>
-      <dt className="text-muted-foreground/70">{k}</dt>
-      <dd className="text-right text-foreground/85">{v}</dd>
-    </>
   );
 }

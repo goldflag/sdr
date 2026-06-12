@@ -1,22 +1,15 @@
-// Radio: the single shared receiver. Owns the rtl_tcp process + client and the
-// DSP chain (spectrum + demodulator), applies control messages, and emits JSON
-// status and binary FFT/audio frames to be broadcast to all WebSocket clients.
+// Radio: the single shared receiver. Orchestrates the rtl_tcp connection
+// (rtltcp/connection.ts), the map decode layers (layers.ts), and the DSP chain
+// (spectrum + demodulator); applies control messages and emits JSON status and
+// binary FFT/audio frames to be broadcast to all WebSocket clients.
 
 import {
   type ClientMessage,
   type DeviceInfo,
-  type MapLayer,
   type Mode,
   type RadioState,
   type ScanEntry,
   type ServerMessage,
-  ADSB_FREQ_HZ,
-  ADSB_SAMPLE_RATE,
-  AIS_FREQ_HZ,
-  AIS_SAMPLE_RATE,
-  APRS_FREQ_HZ,
-  APRS_IF_OFFSET,
-  APRS_SAMPLE_RATE,
   ISM_SAMPLE_RATE,
   AUDIO_RATE,
   DEFAULT_BANDWIDTH,
@@ -28,35 +21,19 @@ import {
   encodeFftFrame,
   gainStepsDb,
 } from "@sdr/shared";
-import { RtlTcpManager } from "./rtltcp/manager";
-import { RtlTcpClient } from "./rtltcp/client";
+import { RtlTcpConnection } from "./rtltcp/connection";
 import { SpectrumAnalyzer } from "./dsp/fft";
 import { Demodulator } from "./dsp/demod";
-import { AdsbReceiver } from "./dsp/adsb";
-import { AisReceiver } from "./dsp/ais";
-import { AprsReceiver } from "./dsp/aprs";
 import { IsmReceiver } from "./dsp/ism";
 import { Nco } from "./dsp/nco";
 import { floatToInt16 } from "./dsp/resample";
+import { MapLayerScheduler } from "./layers";
 import { Scanner } from "./scanner";
-
-// A dongle/rtl_tcp failure while clients are connected triggers automatic
-// restarts with exponential backoff (1s, 2s, 4s … capped), giving up after a
-// few attempts so a genuinely unplugged dongle doesn't loop forever.
-const RECONNECT_MAX_ATTEMPTS = 6;
-const RECONNECT_MAX_DELAY_MS = 15_000;
 
 const FFT_INTERVAL_MS = 50; // ~20 fps
 const FFT_SIZE = 2048;
-const ADSB_BROADCAST_MS = 1000; // aircraft table refresh rate
-const AIS_BROADCAST_MS = 1000; // vessel table refresh rate
-const APRS_BROADCAST_MS = 1000; // station table refresh rate
 const ISM_BROADCAST_MS = 500; // ISM event log refresh rate
 const RDS_BROADCAST_MS = 1000; // RDS station refresh rate (WFM only)
-// When several map layers are enabled, the dongle round-robins across them.
-const LAYER_DWELL_MS = 5000; // time spent on each band before rotating
-const LAYER_SETTLE_MS = 300; // ignore IQ right after a retune (tuner transient)
-const MAP_LAYERS: MapLayer[] = ["adsb", "ais", "aprs"];
 
 export interface RadioSinks {
   json: (msg: ServerMessage) => void;
@@ -73,14 +50,11 @@ const MANUAL_TUNE = new Set<ClientMessage["type"]>([
 ]);
 
 export class Radio {
-  private manager: RtlTcpManager;
-  private client: RtlTcpClient | null = null;
+  private conn: RtlTcpConnection;
   private spectrum = new SpectrumAnalyzer(FFT_SIZE);
   private demod = new Demodulator();
-  private adsb = new AdsbReceiver();
-  private ais = new AisReceiver();
-  private aprs = new AprsReceiver();
   private ism = new IsmReceiver();
+  private layers: MapLayerScheduler;
   private scanner = new Scanner({
     tune: (e) => this.scanTune(e),
     status: (s) => {
@@ -94,54 +68,57 @@ export class Radio {
   private state: RadioState = { ...DEFAULT_STATE };
   private lastFft = 0;
   private lastSignal = 0;
-  private lastAdsb = 0;
-  private lastAdsbCount = 0;
-  private lastAis = 0;
-  private lastAisCount = 0;
-  private lastAprs = 0;
-  private lastAprsCount = 0;
   private lastIsm = 0;
   private lastRds = 0;
-  // Round-robin scheduler for the map decode layers.
-  private mapActive = false;
-  private mapTimer: ReturnType<typeof setInterval> | null = null;
-  private mapOrder: MapLayer[] = [];
-  private current: MapLayer | null = null;
-  private tuneAt = 0;
   // Receiver settings saved when entering a decode mode (ADS-B / AIS), restored
   // on exit.
   private preDecode: Pick<
     RadioState,
     "centerHz" | "sampleRate" | "gainMode" | "gainDb" | "directSampling"
   > | null = null;
-  private starting = false;
-  private stopping = false;
-  // True between start() and stop(): the radio *should* be running, so an
-  // unexpected rtl_tcp exit or TCP drop schedules an automatic reconnect.
-  private desired = false;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private reconnectAttempts = 0;
 
   constructor(private sinks: RadioSinks) {
     // ISM decode is delegated to rtl_433; advertise whether it's installed so
     // the client can disable the ISM tab when it isn't.
     this.state.ismAvailable = IsmReceiver.available();
-    this.manager = new RtlTcpManager();
-    this.manager.on((e) => {
-      if (e.type === "log") console.log(`[rtl_tcp] ${e.line}`);
-      else if (e.type === "exit") {
-        this.client?.close();
-        this.client = null;
-        this.deviceInfo = null;
-        this.state.running = false;
-        this.starting = false;
-        // Don't surface an error for a stop we initiated (e.g. last client left).
-        const expected = this.stopping;
-        this.stopping = false;
+    this.conn = new RtlTcpConnection({
+      onUp: (h) => {
+        this.deviceInfo = {
+          tuner: h.tuner,
+          tunerName: TUNER_NAME[h.tuner] ?? `tuner ${h.tuner}`,
+          gains: gainStepsDb(h.tuner),
+        };
+        this.sinks.json({ type: "deviceInfo", info: this.deviceInfo });
+        this.applyAll();
+        this.state.running = true;
         this.broadcastState();
-        if (!expected) this.scheduleReconnect(e.reason);
-      }
+      },
+      onDown: (kind) => {
+        if (kind === "exit") this.deviceInfo = null;
+        this.state.running = false;
+        this.broadcastState();
+      },
+      onIq: (iq) => this.onIq(iq),
+      // Raw CU8 IQ is piped to rtl_433 while in ISM mode (feed() no-ops otherwise).
+      onRawIq: (bytes) => this.ism.feed(bytes),
+      onError: (msg) => this.sinks.json({ type: "error", message: msg }),
     });
+    this.layers = new MapLayerScheduler({
+      state: this.state,
+      send: (msg) => this.sinks.json(msg),
+      applyReceiver: () => this.applyReceiver(),
+      broadcastState: () => this.broadcastState(),
+      saveDecodeState: () => this.saveDecodeState(),
+      restoreDecodeState: () => this.restoreDecodeState(),
+      maxGain: () => this.maxGain(),
+      stopScan: () => this.scanner.stop(),
+      exitIsm: () => this.exitIsm(),
+    });
+  }
+
+  /** The live rtl_tcp control client, or null while disconnected. */
+  private get client() {
+    return this.conn.client;
   }
 
   getState(): RadioState {
@@ -152,106 +129,14 @@ export class Radio {
   }
 
   async start() {
-    this.desired = true;
-    this.reconnectAttempts = 0;
-    this.clearReconnect();
-    await this.ensureStarted();
+    await this.conn.start();
   }
 
   stop() {
-    this.desired = false;
-    this.clearReconnect();
-    this.stopping = true;
-    this.client?.close();
-    this.client = null;
-    this.manager.stop();
+    this.conn.stop();
     this.state.running = false;
-    this.starting = false;
     this.deviceInfo = null;
     this.broadcastState();
-  }
-
-  private async ensureStarted() {
-    if (this.state.running || this.starting) return;
-    this.starting = true;
-    await this.manager.start();
-    // rtl_tcp logs "listening..." to block-buffered stdout, so we don't wait
-    // for it — just connect, retrying until the TCP socket accepts.
-    await this.connectClient();
-  }
-
-  private clearReconnect() {
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-  }
-
-  /** After an unexpected rtl_tcp exit / TCP drop, retry with backoff. */
-  private scheduleReconnect(reason: string) {
-    if (!this.desired || this.reconnectTimer) return;
-    if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
-      this.desired = false;
-      this.sinks.json({
-        type: "error",
-        message: `${reason} — gave up after ${RECONNECT_MAX_ATTEMPTS} reconnect attempts; check the dongle and press start`,
-      });
-      return;
-    }
-    const delay = Math.min(
-      RECONNECT_MAX_DELAY_MS,
-      1000 * 2 ** this.reconnectAttempts,
-    );
-    this.reconnectAttempts++;
-    this.sinks.json({
-      type: "error",
-      message: `${reason} — reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts}/${RECONNECT_MAX_ATTEMPTS})`,
-    });
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      void this.ensureStarted();
-    }, delay);
-  }
-
-  private async connectClient() {
-    const client = new RtlTcpClient({
-      host: this.manager.host,
-      port: this.manager.port,
-    });
-    client.onHeader((h) => {
-      this.deviceInfo = {
-        tuner: h.tuner,
-        tunerName: TUNER_NAME[h.tuner] ?? `tuner ${h.tuner}`,
-        gains: gainStepsDb(h.tuner),
-      };
-      this.sinks.json({ type: "deviceInfo", info: this.deviceInfo });
-      this.applyAll();
-      this.state.running = true;
-      this.starting = false;
-      this.reconnectAttempts = 0; // healthy connection — reset the backoff
-      this.broadcastState();
-    });
-    client.onIq((iq) => this.onIq(iq));
-    // Raw CU8 IQ is piped to rtl_433 while in ISM mode (feed() no-ops otherwise).
-    client.onRawIq((bytes) => this.ism.feed(bytes));
-    client.onError((msg) => this.sinks.json({ type: "error", message: msg }));
-    client.onClose(() => {
-      // Ignore closes from a superseded client (a reconnect already replaced it).
-      if (this.client && this.client !== client) return;
-      this.state.running = false;
-      this.broadcastState();
-      // The rtl_tcp process may still be alive (TCP-only drop) — ensureStarted
-      // skips the spawn in that case and just redials the socket.
-      this.scheduleReconnect("lost connection to rtl_tcp");
-    });
-    try {
-      await client.connect();
-      this.client = client;
-    } catch (err) {
-      this.starting = false;
-      this.sinks.json({ type: "error", message: (err as Error).message });
-      this.scheduleReconnect("could not connect to rtl_tcp");
-    }
   }
 
   // --- control ---
@@ -353,16 +238,16 @@ export class Radio {
         this.demod.resetRds(); // tuned to a different station within the band
         break;
       case "setAdsb":
-        this.setLayer("adsb", msg.on);
+        this.layers.setLayer("adsb", msg.on);
         break;
       case "setAdsbRef":
-        this.adsb.setRef(msg.lat, msg.lon);
+        this.layers.setAdsbRef(msg.lat, msg.lon);
         break;
       case "setAis":
-        this.setLayer("ais", msg.on);
+        this.layers.setLayer("ais", msg.on);
         break;
       case "setAprs":
-        this.setLayer("aprs", msg.on);
+        this.layers.setLayer("aprs", msg.on);
         break;
       case "setIsm":
         if (msg.on) this.enterIsm();
@@ -394,6 +279,8 @@ export class Radio {
     }
     this.broadcastState();
   }
+
+  // --- decode-mode bookkeeping (shared by map layers and ISM) -------------
 
   /** Save the current receiver tuning so a decode mode can be undone on exit. */
   private saveDecodeState() {
@@ -428,117 +315,13 @@ export class Radio {
     }
   }
 
-  // --- map decode layers (ADS-B / AIS / APRS, time-multiplexed) -----------
-
-  /** Enable/disable a map layer, then reconcile the round-robin schedule. */
-  private setLayer(layer: MapLayer, on: boolean) {
-    if (this.state[layer] === on) return;
-    if (on) this.exitIsm(); // map layers and ISM both need the dongle
-    this.state[layer] = on;
-    if (on) this.resetLayer(layer); // clear stale targets from a prior session
-    this.reconcileLayers();
-  }
-
-  private resetLayer(layer: MapLayer) {
-    if (layer === "adsb") {
-      this.adsb.reset();
-      this.lastAdsb = 0;
-      this.lastAdsbCount = 0;
-    } else if (layer === "ais") {
-      this.ais.reset();
-      this.lastAis = 0;
-      this.lastAisCount = 0;
-    } else {
-      this.aprs.reset();
-      this.lastAprs = 0;
-      this.lastAprsCount = 0;
-    }
-  }
-
-  /** Centre/rate the dongle for one layer and mark it the active one. */
-  private tuneLayer(layer: MapLayer) {
-    const s = this.state;
-    s.directSampling = DIRECT_SAMPLING.OFF;
-    if (layer === "adsb") {
-      s.centerHz = ADSB_FREQ_HZ;
-      s.sampleRate = ADSB_SAMPLE_RATE;
-    } else if (layer === "ais") {
-      s.centerHz = AIS_FREQ_HZ;
-      s.sampleRate = AIS_SAMPLE_RATE;
-    } else {
-      // Tune below the channel so the FM carrier clears the centre DC spike.
-      s.centerHz = APRS_FREQ_HZ - APRS_IF_OFFSET;
-      s.sampleRate = APRS_SAMPLE_RATE;
-    }
-    this.current = layer;
-    s.activeLayer = layer;
-    this.tuneAt = Date.now();
-    this.applyReceiver();
-  }
-
-  /** Start/stop/retime the dongle to cover exactly the enabled layers. */
-  private reconcileLayers() {
-    const enabled = MAP_LAYERS.filter((l) => this.state[l]);
-    if (this.mapTimer) {
-      clearInterval(this.mapTimer);
-      this.mapTimer = null;
-    }
-    if (enabled.length === 0) {
-      if (this.mapActive) {
-        this.mapActive = false;
-        this.current = null;
-        this.state.activeLayer = null;
-        this.restoreDecodeState();
-        this.applyReceiver();
-      }
-      return;
-    }
-    this.scanner.stop();
-    if (!this.mapActive) {
-      this.mapActive = true;
-      this.saveDecodeState();
-      this.maxGain();
-    }
-    this.mapOrder = enabled;
-    // Keep dwelling on the current band if it's still enabled, else start over.
-    if (!this.current || !enabled.includes(this.current)) {
-      this.tuneLayer(enabled[0]!);
-    }
-    // Only round-robin when more than one band is enabled (else full duty).
-    if (enabled.length > 1) {
-      this.mapTimer = setInterval(() => this.rotateLayer(), LAYER_DWELL_MS);
-    }
-  }
-
-  private rotateLayer() {
-    if (!this.state.running) return; // don't thrash a stopped/disconnected tuner
-    const order = this.mapOrder;
-    if (order.length < 2) return;
-    const i = (order.indexOf(this.current as MapLayer) + 1) % order.length;
-    this.tuneLayer(order[i]!);
-    this.broadcastState();
-  }
-
-  /** Force every map layer off (releasing the dongle), e.g. to enter ISM. */
-  private disableAllLayers() {
-    for (const l of MAP_LAYERS) this.state[l] = false;
-    if (this.mapTimer) {
-      clearInterval(this.mapTimer);
-      this.mapTimer = null;
-    }
-    if (this.mapActive) {
-      this.mapActive = false;
-      this.current = null;
-      this.state.activeLayer = null;
-      this.restoreDecodeState();
-    }
-  }
+  // --- ISM (rtl_433 delegate) ----------------------------------------------
 
   /** Retune to the selected ISM band @ 250 kSPS and start the rtl_433 decoder. */
   private enterIsm() {
     if (this.state.ism) return;
     if (!this.state.ismAvailable) return; // rtl_433 not installed — nothing to do
-    this.disableAllLayers(); // release the dongle from map mode
+    this.layers.disableAll(); // release the dongle from map mode
     this.scanner.stop();
     this.saveDecodeState();
     const s = this.state;
@@ -560,6 +343,8 @@ export class Radio {
     this.restoreDecodeState();
     this.applyReceiver();
   }
+
+  // --- device configuration -------------------------------------------------
 
   /** Push center freq / sample rate / gain / direct sampling to the device. */
   private applyReceiver() {
@@ -649,62 +434,8 @@ export class Radio {
   // --- IQ processing ---
 
   private onIq(iq: Float32Array) {
-    // Map layers: only the band the dongle is parked on right now decodes; the
-    // others keep their accumulated targets until their next dwell. Skip the
-    // first samples after a retune while the tuner settles.
-    if (this.current) {
-      const now = Date.now();
-      if (now - this.tuneAt < LAYER_SETTLE_MS) return;
-      if (this.current === "adsb") {
-        this.adsb.process(iq);
-        if (now - this.lastAdsb >= ADSB_BROADCAST_MS) {
-          const total = this.adsb.totalMessages;
-          const rate = this.lastAdsb
-            ? (total - this.lastAdsbCount) / ((now - this.lastAdsb) / 1000)
-            : 0;
-          this.lastAdsb = now;
-          this.lastAdsbCount = total;
-          this.sinks.json({
-            type: "adsb",
-            aircraft: this.adsb.snapshot(now),
-            messageRate: Math.round(rate),
-          });
-        }
-      } else if (this.current === "ais") {
-        this.ais.process(iq);
-        if (now - this.lastAis >= AIS_BROADCAST_MS) {
-          const total = this.ais.totalMessages;
-          const rate = this.lastAis
-            ? (total - this.lastAisCount) / ((now - this.lastAis) / 1000)
-            : 0;
-          this.lastAis = now;
-          this.lastAisCount = total;
-          this.sinks.json({
-            type: "ais",
-            vessels: this.ais.snapshot(now),
-            messageRate: Math.round(rate),
-            framesSeen: this.ais.candidateFrames,
-          });
-        }
-      } else {
-        this.aprs.process(iq);
-        if (now - this.lastAprs >= APRS_BROADCAST_MS) {
-          const total = this.aprs.totalMessages;
-          const rate = this.lastAprs
-            ? (total - this.lastAprsCount) / ((now - this.lastAprs) / 1000)
-            : 0;
-          this.lastAprs = now;
-          this.lastAprsCount = total;
-          this.sinks.json({
-            type: "aprs",
-            stations: this.aprs.snapshot(now),
-            messageRate: Math.round(rate),
-            framesSeen: this.aprs.candidateFrames,
-          });
-        }
-      }
-      return;
-    }
+    // An active map layer (ADS-B / AIS / APRS) consumes the whole block.
+    if (this.layers.processIq(iq, Date.now())) return;
 
     if (this.state.ism) {
       // Decoding happens in the rtl_433 child (fed raw CU8 via onRawIq); here we

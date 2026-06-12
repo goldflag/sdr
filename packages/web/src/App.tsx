@@ -1,7 +1,13 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { DEFAULT_STATE, type RadioState } from "@sdr/shared";
+// App shell: wires the radio socket, the audio player, and the UI store
+// (lib/ui-store) into the three views — spectrum/waterfall, the live map, and
+// the ISM console. View/layer changes that retune the server radio are
+// orchestrated here; the chrome lives in components/AppChrome.
+
+import { lazy, Suspense, useEffect } from "react";
+import { DEFAULT_STATE, type MapLayer } from "@sdr/shared";
 import { useRadio } from "@/lib/ws";
-import { PcmPlayer } from "@/audio/pcm-player";
+import { useAudioPlayer } from "@/lib/use-audio";
+import { useUi, type Layers, type View } from "@/lib/ui-store";
 import { SpectrumWaterfall } from "@/components/SpectrumWaterfall";
 import { Controls } from "@/components/Controls";
 import { Presets } from "@/components/Presets";
@@ -17,53 +23,26 @@ import { Section } from "@/components/Controls";
 import { IsmPanel } from "@/components/IsmPanel";
 import { IsmConsole } from "@/components/IsmConsole";
 import { RdsPanel } from "@/components/RdsPanel";
+import { SpectrumDisplay } from "@/components/SpectrumDisplay";
 import {
-  SpectrumDisplay,
-  DEFAULT_DISPLAY,
-  type DisplaySettings,
-} from "@/components/SpectrumDisplay";
-import { Button } from "@/components/ui/button";
-import { Slider } from "@/components/ui/slider";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
-import {
-  Activity,
-  AlertTriangle,
-  AudioWaveform,
-  Map as MapIcon,
-  Plane,
-  RadioReceiver,
-  RadioTower,
-  Ship,
-  Volume1,
-  Volume2,
-  VolumeX,
-} from "lucide-react";
+  AudioControl,
+  LAYER_LABEL,
+  LayerToggle,
+  StatusBar,
+  ViewTabs,
+} from "@/components/AppChrome";
+import { AlertTriangle } from "lucide-react";
 
 // OpenLayers is heavy; only load the map when the tracking view is opened.
 const AdsbMap = lazy(() =>
   import("@/components/AdsbMap").then((m) => ({ default: m.AdsbMap })),
 );
 
-type View = "spectrum" | "track" | "ism";
-type MapLayer = "adsb" | "ais" | "aprs";
-type Layers = Record<MapLayer, boolean>;
-
 export default function App() {
   const radio = useRadio();
-  const playerRef = useRef<PcmPlayer | null>(null);
-  if (!playerRef.current) playerRef.current = new PcmPlayer();
-  const [audioRunning, setAudioRunning] = useState(false);
-  const [volume, setVolume] = useState(0.7);
-  const [muted, setMuted] = useState(false);
-  const [view, setView] = useState<View>("spectrum");
-  const [layers, setLayers] = useState<Layers>(loadLayers);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [ref, setRef] = useState<{ lat: number; lon: number } | null>(loadRef);
-  const [display, setDisplay] = useState<DisplaySettings>(loadDisplay);
+  const audio = useAudioPlayer(radio.subscribeAudio);
+  const ui = useUi();
+  const { view, layers, selected, receiverRef, display } = ui;
   const bm = useBookmarks();
 
   const state = radio.state ?? DEFAULT_STATE;
@@ -74,14 +53,14 @@ export default function App() {
       ? radio.aircraft.find((a) => a.icao === selected)
       : undefined;
   const selDist =
-    selAircraft && ref && selAircraft.lat != null
-      ? distanceNm(ref.lat, ref.lon, selAircraft.lat, selAircraft.lon!)
+    selAircraft && receiverRef && selAircraft.lat != null
+      ? distanceNm(
+          receiverRef.lat,
+          receiverRef.lon,
+          selAircraft.lat,
+          selAircraft.lon!,
+        )
       : null;
-
-  const updateDisplay = (next: DisplaySettings) => {
-    setDisplay(next);
-    saveDisplay(next);
-  };
 
   const sendLayer = (l: MapLayer, on: boolean) => {
     if (l === "adsb") radio.send({ type: "setAdsb", on });
@@ -104,8 +83,7 @@ export default function App() {
   };
 
   const switchView = (v: View) => {
-    setView(v);
-    setSelected(null);
+    ui.setView(v);
     if (v === "track") {
       radio.send({ type: "setIsm", on: false });
       activateLayers(layers);
@@ -121,56 +99,24 @@ export default function App() {
 
   // Toggle one map layer on/off (layers display together).
   const toggleLayer = (l: MapLayer) => {
-    const next = { ...layers, [l]: !layers[l] };
-    setLayers(next);
-    saveLayers(next);
+    const next = ui.toggleLayer(l);
     sendLayer(l, next[l]);
-  };
-
-  const setReceiverRef = (lat: number | null, lon: number | null) => {
-    const next = lat != null && lon != null ? { lat, lon } : null;
-    setRef(next);
-    saveRef(next);
   };
 
   // Keep the server's reference position in sync (also re-sent on reconnect).
   const { send, connected } = radio;
   useEffect(() => {
-    send({ type: "setAdsbRef", lat: ref?.lat ?? null, lon: ref?.lon ?? null });
-  }, [send, connected, ref]);
-
-  // Pipe audio frames to the player.
-  useEffect(
-    () => radio.subscribeAudio((f) => playerRef.current?.push(f.pcm)),
-    [radio.subscribeAudio],
-  );
+    send({
+      type: "setAdsbRef",
+      lat: receiverRef?.lat ?? null,
+      lon: receiverRef?.lon ?? null,
+    });
+  }, [send, connected, receiverRef]);
 
   // Flush buffered audio when retuning / changing mode to keep latency low.
   useEffect(() => {
-    playerRef.current?.flush();
-  }, [state.mode, state.centerHz]);
-
-  const enableAudio = async () => {
-    await playerRef.current?.init();
-    playerRef.current?.setVolume(muted ? 0 : volume);
-    setAudioRunning(playerRef.current?.running ?? false);
-  };
-
-  // Dragging the slider sets a level and always unmutes.
-  const changeVolume = (v: number) => {
-    setVolume(v);
-    setMuted(false);
-    playerRef.current?.setVolume(v);
-  };
-
-  // Toggle mute, keeping the slider level so it can be restored.
-  const toggleMute = () => {
-    setMuted((m) => {
-      const next = !m;
-      playerRef.current?.setVolume(next ? 0 : volume);
-      return next;
-    });
-  };
+    audio.flush();
+  }, [audio.flush, state.mode, state.centerHz]);
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
@@ -192,12 +138,12 @@ export default function App() {
                   onToggle={toggleLayer}
                 />
               </div>
-              <Section title="Receiver location" defaultOpen={!ref}>
+              <Section title="Receiver location" defaultOpen={!receiverRef}>
                 <RefControls
-                  refLat={ref?.lat ?? null}
-                  refLon={ref?.lon ?? null}
-                  onSetRef={setReceiverRef}
-                  hasRef={ref != null}
+                  refLat={receiverRef?.lat ?? null}
+                  refLon={receiverRef?.lon ?? null}
+                  onSetRef={ui.setReceiverRef}
+                  hasRef={receiverRef != null}
                 />
               </Section>
               {!layers.adsb && !layers.ais && !layers.aprs && (
@@ -211,10 +157,10 @@ export default function App() {
                   aircraft={radio.aircraft}
                   messageRate={radio.messageRate}
                   selected={selected}
-                  onSelect={setSelected}
-                  refLat={ref?.lat ?? null}
-                  refLon={ref?.lon ?? null}
-                  onSetRef={setReceiverRef}
+                  onSelect={ui.setSelected}
+                  refLat={receiverRef?.lat ?? null}
+                  refLon={receiverRef?.lon ?? null}
+                  onSetRef={ui.setReceiverRef}
                   hideRef
                 />
               )}
@@ -224,10 +170,10 @@ export default function App() {
                   messageRate={radio.aisMessageRate}
                   framesSeen={radio.aisFramesSeen}
                   selected={selected}
-                  onSelect={setSelected}
-                  refLat={ref?.lat ?? null}
-                  refLon={ref?.lon ?? null}
-                  onSetRef={setReceiverRef}
+                  onSelect={ui.setSelected}
+                  refLat={receiverRef?.lat ?? null}
+                  refLon={receiverRef?.lon ?? null}
+                  onSetRef={ui.setReceiverRef}
                   hideRef
                 />
               )}
@@ -237,10 +183,10 @@ export default function App() {
                   messageRate={radio.aprsMessageRate}
                   framesSeen={radio.aprsFramesSeen}
                   selected={selected}
-                  onSelect={setSelected}
-                  refLat={ref?.lat ?? null}
-                  refLon={ref?.lon ?? null}
-                  onSetRef={setReceiverRef}
+                  onSelect={ui.setSelected}
+                  refLat={receiverRef?.lat ?? null}
+                  refLon={receiverRef?.lon ?? null}
+                  onSetRef={ui.setReceiverRef}
                   hideRef
                 />
               )}
@@ -272,7 +218,7 @@ export default function App() {
                 stats={radio.rdsStats}
                 mode={state.mode}
               />
-              <SpectrumDisplay display={display} onChange={updateDisplay} />
+              <SpectrumDisplay display={display} onChange={ui.setDisplay} />
             </>
           )}
         </aside>
@@ -312,12 +258,12 @@ export default function App() {
             )}
             {view === "spectrum" && (
               <AudioControl
-                running={audioRunning}
-                volume={volume}
-                muted={muted}
-                onVolume={changeVolume}
-                onToggleMute={toggleMute}
-                onEnable={enableAudio}
+                running={audio.running}
+                volume={audio.volume}
+                muted={audio.muted}
+                onVolume={audio.changeVolume}
+                onToggleMute={audio.toggleMute}
+                onEnable={audio.enable}
               />
             )}
           </div>
@@ -355,9 +301,9 @@ export default function App() {
                   vessels={layers.ais ? radio.vessels : []}
                   stations={layers.aprs ? radio.stations : []}
                   selected={selected}
-                  onSelect={setSelected}
-                  refLat={ref?.lat ?? null}
-                  refLon={ref?.lon ?? null}
+                  onSelect={ui.setSelected}
+                  refLat={receiverRef?.lat ?? null}
+                  refLon={receiverRef?.lon ?? null}
                 />
               </Suspense>
               {selAircraft && (
@@ -367,7 +313,7 @@ export default function App() {
                       key={selAircraft.icao}
                       report={selAircraft}
                       dist={selDist}
-                      onClose={() => setSelected(null)}
+                      onClose={() => ui.setSelected(null)}
                     />
                   </div>
                 </div>
@@ -386,336 +332,10 @@ export default function App() {
 
       <StatusBar
         state={state}
-        audioRunning={audioRunning}
+        audioRunning={audio.running}
         view={view}
         layers={layers}
       />
     </div>
-  );
-}
-
-const LAYER_LABEL: Record<MapLayer, string> = {
-  adsb: "ADS-B",
-  ais: "AIS",
-  aprs: "APRS",
-};
-
-const REF_KEY = "sdr.adsb.ref";
-
-function loadRef(): { lat: number; lon: number } | null {
-  try {
-    const v = localStorage.getItem(REF_KEY);
-    if (!v) return null;
-    const r = JSON.parse(v);
-    return typeof r?.lat === "number" && typeof r?.lon === "number" ? r : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveRef(r: { lat: number; lon: number } | null) {
-  try {
-    if (r) localStorage.setItem(REF_KEY, JSON.stringify(r));
-    else localStorage.removeItem(REF_KEY);
-  } catch {
-    /* storage unavailable */
-  }
-}
-
-const LAYERS_KEY = "sdr.map.layers";
-const DEFAULT_LAYERS: Layers = { adsb: true, ais: false, aprs: false };
-
-function loadLayers(): Layers {
-  try {
-    const v = localStorage.getItem(LAYERS_KEY);
-    if (v) return { ...DEFAULT_LAYERS, ...JSON.parse(v) };
-  } catch {
-    /* ignore */
-  }
-  return DEFAULT_LAYERS;
-}
-
-function saveLayers(l: Layers) {
-  try {
-    localStorage.setItem(LAYERS_KEY, JSON.stringify(l));
-  } catch {
-    /* storage unavailable */
-  }
-}
-
-const DISPLAY_KEY = "sdr.display";
-
-function loadDisplay(): DisplaySettings {
-  try {
-    const v = localStorage.getItem(DISPLAY_KEY);
-    if (v) return { ...DEFAULT_DISPLAY, ...JSON.parse(v) };
-  } catch {
-    /* ignore */
-  }
-  return DEFAULT_DISPLAY;
-}
-
-function saveDisplay(d: DisplaySettings) {
-  try {
-    localStorage.setItem(DISPLAY_KEY, JSON.stringify(d));
-  } catch {
-    /* storage unavailable */
-  }
-}
-
-function ViewTabs({
-  view,
-  onChange,
-  ismAvailable,
-}: {
-  view: View;
-  onChange: (v: View) => void;
-  ismAvailable: boolean;
-}) {
-  const tabs: {
-    id: View;
-    label: string;
-    icon: typeof Plane;
-    disabled?: boolean;
-    reason?: string;
-  }[] = [
-    { id: "spectrum", label: "Spectrum", icon: AudioWaveform },
-    { id: "track", label: "Map", icon: MapIcon },
-    {
-      id: "ism",
-      label: "ISM 433",
-      icon: RadioReceiver,
-      disabled: !ismAvailable,
-      reason: "Requires rtl_433 — install it (e.g. brew install rtl_433) and restart the server to decode ISM sensors.",
-    },
-  ];
-  return (
-    <div className="flex items-center gap-0.5 rounded-md bg-muted/50 p-0.5">
-      {tabs.map((t) => {
-        const Icon = t.icon;
-        const active = view === t.id;
-        const tab = (
-          <button
-            key={t.id}
-            type="button"
-            disabled={t.disabled}
-            onClick={() => !t.disabled && onChange(t.id)}
-            className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-              t.disabled
-                ? "cursor-not-allowed text-muted-foreground/40"
-                : active
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            <Icon className="size-3.5" />
-            {t.label}
-          </button>
-        );
-        if (!t.disabled) return tab;
-        // Disabled tab: a disabled <button> emits no pointer events, so wrap it
-        // in a span that carries the tooltip trigger and explains why.
-        return (
-          <Tooltip key={t.id}>
-            <TooltipTrigger asChild>
-              <span className="inline-flex" tabIndex={0}>
-                {tab}
-              </span>
-            </TooltipTrigger>
-            <TooltipContent>{t.reason}</TooltipContent>
-          </Tooltip>
-        );
-      })}
-    </div>
-  );
-}
-
-/**
- * Multi-select map layers. Each is independently on/off; the server round-robins
- * the dongle across the enabled bands and the map shows them together. A pulsing
- * dot marks the band being sampled right now.
- */
-function LayerToggle({
-  layers,
-  activeLayer,
-  onToggle,
-}: {
-  layers: Layers;
-  activeLayer: MapLayer | null;
-  onToggle: (l: MapLayer) => void;
-}) {
-  const opts: { id: MapLayer; label: string; icon: typeof Plane }[] = [
-    { id: "adsb", label: "Aircraft", icon: Plane },
-    { id: "ais", label: "Ships", icon: Ship },
-    { id: "aprs", label: "APRS", icon: RadioTower },
-  ];
-  return (
-    <div className="flex items-center gap-0.5 rounded-md border bg-muted/30 p-0.5">
-      {opts.map((o) => {
-        const Icon = o.icon;
-        const on = layers[o.id];
-        const live = activeLayer === o.id;
-        return (
-          <button
-            key={o.id}
-            type="button"
-            onClick={() => onToggle(o.id)}
-            aria-pressed={on}
-            title={`${o.label} layer ${on ? "on" : "off"}`}
-            className={`relative flex flex-1 items-center justify-center gap-1.5 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
-              on
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground/70 hover:text-foreground"
-            }`}
-          >
-            {live && (
-              <span className="absolute right-1 top-1 size-1.5 animate-pulse rounded-full bg-primary" />
-            )}
-            <Icon className="size-3" />
-            {o.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-/** Compact audio output control for the view toolbar. */
-function AudioControl({
-  running,
-  volume,
-  muted,
-  onVolume,
-  onToggleMute,
-  onEnable,
-}: {
-  running: boolean;
-  volume: number;
-  muted: boolean;
-  onVolume: (v: number) => void;
-  onToggleMute: () => void;
-  onEnable: () => void;
-}) {
-  if (!running) {
-    return (
-      <Button
-        onClick={onEnable}
-        size="sm"
-        variant="outline"
-        className="ml-auto"
-      >
-        <Volume2 /> Enable audio
-      </Button>
-    );
-  }
-  const silent = muted || volume === 0;
-  const Icon = silent ? VolumeX : volume < 0.5 ? Volume1 : Volume2;
-  return (
-    <div className="ml-auto flex items-center gap-2">
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            onClick={onToggleMute}
-            aria-label={muted ? "Unmute" : "Mute"}
-            aria-pressed={muted}
-            className="inline-flex text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none"
-          >
-            <Icon className="size-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent>{muted ? "Unmute" : "Mute"}</TooltipContent>
-      </Tooltip>
-      <Slider
-        value={[volume]}
-        min={0}
-        max={1}
-        step={0.01}
-        onValueChange={([v]) => onVolume(v ?? 0)}
-        aria-label="Volume"
-        className="w-24"
-      />
-      <span
-        className={`w-9 text-right font-mono text-[11px] tabular-nums ${
-          silent ? "text-muted-foreground" : "text-foreground/70"
-        }`}
-      >
-        {Math.round(volume * 100)}%
-      </span>
-    </div>
-  );
-}
-
-function StatusBar({
-  state,
-  audioRunning,
-  view,
-  layers,
-}: {
-  state: RadioState;
-  audioRunning: boolean;
-  view: View;
-  layers: Layers;
-}) {
-  const isTrack = view === "track";
-  const isIsm = view === "ism";
-  const enabledCount = Number(layers.adsb) + Number(layers.ais) + Number(layers.aprs);
-  const liveFreqM =
-    state.activeLayer === "adsb"
-      ? "1090.000"
-      : state.activeLayer === "ais"
-        ? "162.000"
-        : state.activeLayer === "aprs"
-          ? "144.390"
-          : null;
-  return (
-    <footer className="flex items-center justify-between gap-4 border-t bg-sidebar px-5 py-1.5 font-mono text-[11px] text-muted-foreground">
-      <span className="flex items-center gap-1.5">
-        <Activity className="size-3 text-primary" />
-        {isTrack
-          ? enabledCount > 1
-            ? `Time-sharing the dongle across ${enabledCount} bands · markers update as each is sampled`
-            : enabledCount === 1
-              ? "Decoding one band · markers update live"
-              : "No layers enabled — pick Aircraft / Ships / APRS"
-          : isIsm
-            ? "Decoding ISM-band sensors via rtl_433"
-            : "Click to tune · scroll to zoom · drag filter edges · ⌥-click to notch"}
-      </span>
-      <div className="flex items-center gap-4">
-        {isTrack ? (
-          <Stat label="FREQ" value={liveFreqM ? `${liveFreqM}M` : "—"} />
-        ) : isIsm ? (
-          <Stat label="FREQ" value={`${(state.ismFreqHz / 1e6).toFixed(3)}M`} />
-        ) : (
-          <>
-            <Stat label="MODE" value={state.mode} />
-            <Stat
-              label="BW"
-              value={`${(state.bandwidth / 1000).toFixed(1)}k`}
-            />
-          </>
-        )}
-        <Stat label="SR" value={`${(state.sampleRate / 1e6).toFixed(3)}M`} />
-        <Stat
-          label="GAIN"
-          value={
-            state.gainMode === "auto" ? "AUTO" : `${state.gainDb.toFixed(0)}dB`
-          }
-        />
-        {view === "spectrum" && (
-          <Stat label="AUDIO" value={audioRunning ? "ON" : "OFF"} />
-        )}
-      </div>
-    </footer>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <span className="flex items-center gap-1.5">
-      <span className="text-muted-foreground/55">{label}</span>
-      <span className="text-foreground/80">{value}</span>
-    </span>
   );
 }
