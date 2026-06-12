@@ -23,6 +23,7 @@ import { Section } from "@/components/Controls";
 import { IsmPanel } from "@/components/IsmPanel";
 import { IsmConsole } from "@/components/IsmConsole";
 import { RdsPanel } from "@/components/RdsPanel";
+import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { SpectrumDisplay } from "@/components/SpectrumDisplay";
 import {
   AudioControl,
@@ -217,6 +218,13 @@ export default function App() {
                 station={radio.rdsStation}
                 stats={radio.rdsStats}
                 mode={state.mode}
+              />
+              <TranscriptPanel
+                segments={radio.transcripts}
+                on={state.transcribe}
+                available={state.transcribeAvailable}
+                model={state.transcribeModel}
+                send={radio.send}
               />
               <SpectrumDisplay display={display} onChange={ui.setDisplay} />
             </>

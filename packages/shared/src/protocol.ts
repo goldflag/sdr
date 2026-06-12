@@ -253,7 +253,9 @@ export type ClientMessage =
   /** Toggle ISM (rtl_433-style) OOK decode at the current ISM frequency. */
   | { type: "setIsm"; on: boolean }
   /** Set the ISM centre frequency in Hz (315 / 434 / 868 / 915 MHz, …). */
-  | { type: "setIsmFreq"; hz: number };
+  | { type: "setIsmFreq"; hz: number }
+  /** Toggle live speech-to-text of the demodulated audio (via whisper.cpp). */
+  | { type: "setTranscribe"; on: boolean };
 
 // ---------------------------------------------------------------------------
 // Server -> Client (JSON status)
@@ -372,6 +374,20 @@ export interface IsmEvent {
   snrDb: number;
 }
 
+/** One transcribed chunk of demodulated audio (speech-to-text via whisper.cpp). */
+export interface TranscriptSegment {
+  /** Monotonic id so clients can merge batches idempotently. */
+  id: number;
+  /** Server epoch milliseconds when the audio chunk ended. */
+  time: number;
+  /** Transcribed text (trimmed, never empty). */
+  text: string;
+  /** Tuned frequency (Hz) the audio was received on. */
+  freqHz: number;
+  /** Length of the transcribed audio, in seconds. */
+  durationS: number;
+}
+
 /** A broadcast-FM clock-time (RDS group 4A). */
 export interface RdsClockTime {
   /** Local time the station broadcast, ISO 8601 with offset (e.g. "2026-06-09T14:30-05:00"). */
@@ -470,6 +486,13 @@ export interface RadioState {
   /** Whether the rtl_433 binary is installed on the server. The client disables
    *  the ISM tab when false, since there is no built-in fallback decoder. */
   ismAvailable: boolean;
+  /** Live speech-to-text of the demodulated audio (via whisper.cpp). */
+  transcribe: boolean;
+  /** Whether whisper.cpp and a ggml model were found on the server. The client
+   *  disables the transcription toggle when false — there is no fallback. */
+  transcribeAvailable: boolean;
+  /** Name of the whisper model in use (e.g. "small.en"), null when unavailable. */
+  transcribeModel: string | null;
 }
 
 export type ServerMessage =
@@ -522,6 +545,12 @@ export type ServerMessage =
    * quality. Sent ~1×/s and reset on every retune or mode change.
    */
   | { type: "rds"; station: RdsStation | null; stats: RdsStats }
+  /**
+   * Transcribed speech segments (only while transcription is on). Sent
+   * incrementally as audio chunks complete; the recent history is also sent
+   * once on connect. Clients merge by `id`.
+   */
+  | { type: "transcript"; segments: TranscriptSegment[] }
   /** Scanner status, or null when scanning stops. */
   | { type: "scan"; status: ScanStatus | null }
   | { type: "error"; message: string };
@@ -661,4 +690,7 @@ export const DEFAULT_STATE: RadioState = {
   ism: false,
   ismFreqHz: ISM_FREQ_HZ,
   ismAvailable: false,
+  transcribe: false,
+  transcribeAvailable: false,
+  transcribeModel: null,
 };

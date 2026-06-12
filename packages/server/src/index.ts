@@ -71,6 +71,10 @@ server = Bun.serve({
       const info = radio.getDeviceInfo();
       if (info) ws.send(JSON.stringify({ type: "deviceInfo", info }));
       ws.send(JSON.stringify({ type: "state", state: radio.getState() }));
+      const transcripts = radio.getTranscripts();
+      if (transcripts.length > 0) {
+        ws.send(JSON.stringify({ type: "transcript", segments: transcripts }));
+      }
       void radio.start(); // idempotent if already running/starting
     },
     message(_ws, message) {
