@@ -26,6 +26,7 @@ import { SpectrumAnalyzer } from "./dsp/fft";
 import { Demodulator } from "./dsp/demod";
 import { IsmReceiver } from "./dsp/ism";
 import { Nco } from "./dsp/nco";
+import { SquelchGate } from "./dsp/squelch";
 import { floatToInt16 } from "./dsp/resample";
 import { MapLayerScheduler } from "./layers";
 import { Scanner } from "./scanner";
@@ -72,6 +73,7 @@ export class Radio {
   });
   private scanHolding = false;
   private vfo = new Nco(DEFAULT_STATE.sampleRate, 0);
+  private squelch = new SquelchGate(AUDIO_RATE);
   private deviceInfo: DeviceInfo | null = null;
   private state: RadioState = { ...DEFAULT_STATE };
   private lastFft = 0;
@@ -177,6 +179,7 @@ export class Radio {
         this.client?.setFrequency(msg.hz);
         this.syncNotches();
         this.demod.resetRds(); // different station — drop the old RDS data
+        this.squelch.reset(); // ...and its power estimate
         break;
       case "setSampleRate":
         this.state.sampleRate = msg.hz;
@@ -256,6 +259,7 @@ export class Radio {
         this.vfo.setFreq(-msg.hz); // bring the VFO down to DC
         this.syncNotches();
         this.demod.resetRds(); // tuned to a different station within the band
+        this.squelch.reset();
         break;
       case "setAdsb":
         this.layers.setLayer("adsb", msg.on);
@@ -395,6 +399,7 @@ export class Radio {
     this.vfo.setSampleRate(s.sampleRate);
     this.vfo.setFreq(-s.vfoOffset);
     this.reconfigureDemod();
+    this.squelch.reset();
     if (!c) return;
     c.setSampleRate(s.sampleRate);
     c.setDirectSampling(s.directSampling);
@@ -425,6 +430,7 @@ export class Radio {
     this.vfo.setSampleRate(s.sampleRate);
     this.vfo.setFreq(-s.vfoOffset);
     this.reconfigureDemod();
+    this.squelch.reset();
     this.demod.setNr(s.nrOn, s.nrLevel);
     this.demod.setNb(s.nbOn, s.nbThreshold);
     this.demod.setAgc(s.agc);
@@ -470,6 +476,7 @@ export class Radio {
     s.filterLow = lo;
     s.filterHigh = hi;
     this.reconfigureDemod();
+    this.squelch.reset();
     this.broadcastState();
   }
 
@@ -517,25 +524,31 @@ export class Radio {
     // Drive the scanner with the live channel power.
     if (this.scanner.active) this.scanner.onPower(powerDb, now);
 
-    const squelch = this.state.squelchDb;
-    const squelchOpen = squelch == null || powerDb >= squelch;
+    const dt = iq.length / 2 / this.state.sampleRate;
+    const squelchOpen = this.squelch.update(
+      powerDb,
+      this.state.squelchDb,
+      dt,
+      now,
+    );
     // While scanning, only pass audio once parked on an active channel, so we
     // don't blast noise from every silent channel we step across.
     const open = squelchOpen && (!this.scanner.active || this.scanHolding);
-    if (audio.length > 0 && open) {
-      this.sinks.binary(encodeAudioFrame(AUDIO_RATE, floatToInt16(audio)));
+    const gated = audio.length > 0 ? this.squelch.shape(audio, open) : null;
+    if (gated) {
+      this.sinks.binary(encodeAudioFrame(AUDIO_RATE, floatToInt16(gated)));
       // Speech-to-text hears exactly what the user hears (squelch-gated, post
       // NR/AGC). The tuned frequency tags each transcript segment, and a change
       // in it tells the transcriber to finish the previous station's chunk.
       if (this.state.transcribe) {
-        this.transcriber.feed(audio, this.state.centerHz + this.state.vfoOffset);
+        this.transcriber.feed(gated, this.state.centerHz + this.state.vfoOffset);
       }
     }
     if (now - this.lastSignal >= 100) {
       this.lastSignal = now;
       this.sinks.json({
         type: "signal",
-        channelDb: powerDb,
+        channelDb: this.squelch.levelDb,
         squelchOpen: squelchOpen,
       });
     }

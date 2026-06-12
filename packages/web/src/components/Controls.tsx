@@ -102,7 +102,10 @@ export function Controls(p: Props) {
                 <InfoTip>
                   Mutes the audio until channel power exceeds this threshold, so
                   you don't sit listening to hiss between transmissions. Raise it
-                  just above the idle noise level.
+                  just above the idle noise level, or press auto while the
+                  channel is quiet. Opens with a little hysteresis and hangs on
+                  briefly after a transmission so flutter doesn't chop the
+                  audio.
                 </InfoTip>
               </span>
               <span
@@ -115,6 +118,21 @@ export function Controls(p: Props) {
               />
             </Label>
             <div className="flex items-center gap-2">
+              {squelchOn && signal && (
+                <button
+                  type="button"
+                  className="rounded border border-border px-1.5 font-mono text-[10px] leading-4 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground motion-reduce:transition-none"
+                  title="Set the threshold just above the current channel power — press while the channel is quiet"
+                  onClick={() =>
+                    send({
+                      type: "setSquelch",
+                      db: Math.min(0, Math.max(-90, Math.round(signal.channelDb + 5))),
+                    })
+                  }
+                >
+                  auto
+                </button>
+              )}
               <span className="font-mono text-[11px] text-muted-foreground">
                 {squelchOn ? `${state.squelchDb!.toFixed(0)} dB` : "off"}
               </span>
