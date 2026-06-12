@@ -57,10 +57,11 @@ export function TranscriptPanel({
   const listRef = useRef<HTMLDivElement | null>(null);
   const pinned = useRef(true);
 
+  // Re-pin on every merge, not just on growth — live previews update in place.
   useEffect(() => {
     const el = listRef.current;
     if (el && pinned.current) el.scrollTop = el.scrollHeight;
-  }, [segments.length]);
+  }, [segments]);
 
   return (
     <Section
@@ -99,7 +100,7 @@ export function TranscriptPanel({
                   send({ type: "setTranscribeModel", model: m })
                 }
               >
-                <SelectTrigger className="h-7 w-[160px] px-2 font-mono text-xs">
+                <SelectTrigger className="h-6 w-auto min-w-0 gap-1 px-1.5 font-mono text-[10px] text-muted-foreground">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -160,7 +161,14 @@ export function TranscriptPanel({
                     <span className="shrink-0 pt-px font-mono text-[10px] tabular-nums text-muted-foreground/70">
                       {formatTime(s.time)}
                     </span>
-                    <p className="text-[11px] leading-snug text-foreground/90">
+                    {/* Live previews refine in place until the utterance ends */}
+                    <p
+                      className={
+                        s.final
+                          ? "text-[11px] leading-snug text-foreground/90"
+                          : "text-[11px] leading-snug italic text-muted-foreground"
+                      }
+                    >
                       {s.text}
                     </p>
                   </div>

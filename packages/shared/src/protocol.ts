@@ -392,18 +392,29 @@ export const TRANSCRIBE_STATUSES = [
 ] as const;
 export type TranscribeStatus = (typeof TRANSCRIBE_STATUSES)[number];
 
-/** One transcribed chunk of demodulated audio (speech-to-text via whisper.cpp). */
+/**
+ * One transcribed chunk of demodulated audio (speech-to-text via whisper.cpp).
+ *
+ * While an utterance is still being spoken the server emits it as a live
+ * preview (`final: false`) that is re-issued with the same `id` and longer
+ * text every couple of seconds; once the utterance completes, a `final: true`
+ * segment with the same `id` replaces it. A final segment with empty `text`
+ * is a tombstone: the preview turned out to be nothing usable (silence,
+ * music, low confidence) and the client should remove that id.
+ */
 export interface TranscriptSegment {
   /** Monotonic id so clients can merge batches idempotently. */
   id: number;
   /** Server epoch milliseconds when the audio chunk ended. */
   time: number;
-  /** Transcribed text (trimmed, never empty). */
+  /** Transcribed text (trimmed; empty only on a final tombstone). */
   text: string;
   /** Tuned frequency (Hz) the audio was received on. */
   freqHz: number;
   /** Length of the transcribed audio, in seconds. */
   durationS: number;
+  /** False while this is a live, still-refining preview of an open utterance. */
+  final: boolean;
 }
 
 /** A broadcast-FM clock-time (RDS group 4A). */

@@ -61,14 +61,19 @@ function mergeIsm(prev: IsmEvent[], batch: IsmEvent[]): IsmEvent[] {
   return [...byId.values()].sort((a, b) => b.id - a.id).slice(0, ISM_LOG_MAX);
 }
 
-/** Merge transcript segments by id, oldest first (the panel reads downward). */
+/** Merge transcript segments by id, oldest first (the panel reads downward).
+ *  Live previews re-arrive under the same id with longer text; an empty-text
+ *  final is a tombstone (the preview turned out to be nothing) — remove it. */
 function mergeTranscripts(
   prev: TranscriptSegment[],
   batch: TranscriptSegment[],
 ): TranscriptSegment[] {
   if (batch.length === 0) return prev;
   const byId = new Map(prev.map((s) => [s.id, s]));
-  for (const s of batch) byId.set(s.id, s);
+  for (const s of batch) {
+    if (s.final && s.text === "") byId.delete(s.id);
+    else byId.set(s.id, s);
+  }
   return [...byId.values()]
     .sort((a, b) => a.id - b.id)
     .slice(-TRANSCRIPT_LOG_MAX);

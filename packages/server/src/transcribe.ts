@@ -8,6 +8,13 @@
 // child's /inference endpoint as WAV. Resulting text segments are surfaced to
 // the UI over the websocket.
 //
+// For a live feel, the open (still-accumulating) utterance is additionally
+// re-transcribed every PREVIEW_STEP_S whenever the inference slot is idle, and
+// pushed as a preview segment (final: false) that the client re-renders in
+// place — so text starts appearing ~2 s after speech instead of after the
+// utterance completes. The eventual full-chunk transcription replaces the
+// preview under the same id (or tombstones it if it turned out to be nothing).
+//
 // If the whisper-server binary or a ggml model can't be found, available() is
 // false and the server tells the client to disable the transcription toggle —
 // there is no built-in fallback.
@@ -40,9 +47,16 @@ const WHISPER_RATE = 16_000;
 // too short to transcribe meaningfully.
 const TARGET_S = 8;
 const SEARCH_S = 1.5;
-const GAP_FLUSH_MS = 700;
+const GAP_FLUSH_MS = 500;
 const MIN_FLUSH_S = 1.0;
 const FLUSH_POLL_MS = 250;
+
+// Live previews: re-transcribe the open buffer after every PREVIEW_STEP_S of
+// new audio, but only when whisper is otherwise idle — finalised chunks always
+// take priority, so previews cost latency nothing and are skipped when the
+// machine is busy. Must exceed MIN_FLUSH_S: a buffer too short to finalise can
+// then never have shown a preview, so nothing dangles when it's dropped.
+const PREVIEW_STEP_S = 1.5;
 
 // Chunks awaiting inference. One request is in flight at a time (the child
 // processes sequentially anyway); if the machine can't keep up, the oldest
@@ -89,6 +103,9 @@ interface PendingChunk {
   freqHz: number;
   time: number; // epoch ms when the chunk ended
   durationS: number;
+  /** Id of the preview segment shown for this utterance, to be replaced by the
+   *  final text (or tombstoned). Null when no preview was ever emitted. */
+  previewId: number | null;
 }
 
 /** One segment of whisper-server's verbose_json response. */
@@ -133,6 +150,14 @@ export class Transcriber {
   private history: TranscriptSegment[] = [];
   private nextId = 1;
   private lastText = "";
+
+  // Live preview of the open utterance. `gen` increments every time the
+  // buffer is taken (cut/flush), so a preview computed for an utterance that
+  // ended mid-inference can be recognised as stale and discarded.
+  private preview: TranscriptSegment | null = null;
+  private previewGen = -1;
+  private gen = 0;
+  private lastPreviewLen = 0;
 
   // Rolling transcript context used as whisper's prompt; only applied to
   // chunks from the same station, so one station's text can't prime another's.
@@ -215,7 +240,7 @@ export class Transcriber {
   }
 
   snapshot(): TranscriptSegment[] {
-    return this.history;
+    return this.preview ? [...this.history, this.preview] : this.history;
   }
 
   /** Switch to another model by name. If running, the child is swapped out
@@ -241,10 +266,13 @@ export class Transcriber {
     this.resampler = new LinearResampler(AUDIO_RATE, WHISPER_RATE);
     this.spawn();
     // Flush a pending utterance once the audio stops (squelch closed / retune
-    // / decode mode entered) instead of waiting for it to reach TARGET_S.
+    // / decode mode entered) instead of waiting for it to reach TARGET_S; in
+    // between, preview the growing utterance whenever whisper sits idle.
     this.flushTimer = setInterval(() => {
       if (this.bufLen > 0 && Date.now() - this.lastFeedAt > GAP_FLUSH_MS) {
         this.flushBuffer();
+      } else {
+        this.maybePreview();
       }
     }, FLUSH_POLL_MS);
   }
@@ -266,6 +294,8 @@ export class Transcriber {
     this.pieces = [];
     this.bufLen = 0;
     this.queue = [];
+    // A preview the user already saw shouldn't vanish — keep it as final.
+    this.promotePreview(this.preview?.id ?? null);
     const proc = this.proc;
     this.proc = null;
     proc?.kill();
@@ -292,14 +322,15 @@ export class Transcriber {
 
   /** Enqueue the whole pending buffer (end of an utterance). */
   private flushBuffer() {
-    const all = this.takeBuffer();
-    if (all.length >= MIN_FLUSH_S * WHISPER_RATE) this.enqueue(all);
+    const { audio, previewId } = this.takeBuffer();
+    if (audio.length >= MIN_FLUSH_S * WHISPER_RATE) this.enqueue(audio, previewId);
+    else this.promotePreview(previewId); // too short to redo — keep what was shown
   }
 
   /** The buffer hit TARGET_S: cut at the quietest 20 ms frame near the end so
    *  we don't split a word, keep the remainder for the next chunk. */
   private cutAtQuietPoint() {
-    const all = this.takeBuffer();
+    const { audio: all, previewId } = this.takeBuffer();
     const frame = Math.round(0.02 * WHISPER_RATE);
     const searchStart = Math.max(frame, all.length - Math.round(SEARCH_S * WHISPER_RATE));
     let best = all.length;
@@ -312,7 +343,7 @@ export class Transcriber {
         best = s;
       }
     }
-    this.enqueue(all.subarray(0, best));
+    this.enqueue(all.subarray(0, best), previewId);
     const rest = all.slice(best);
     if (rest.length > 0) {
       this.pieces = [rest];
@@ -320,40 +351,87 @@ export class Transcriber {
     }
   }
 
-  /** Drain the accumulated pieces into one contiguous buffer. */
-  private takeBuffer(): Float32Array {
-    const all = new Float32Array(this.bufLen);
+  /** Drain the accumulated pieces into one contiguous buffer, ending the open
+   *  utterance: its preview id (if one was shown) now belongs to the caller,
+   *  and any preview inference still in flight becomes stale. */
+  private takeBuffer(): { audio: Float32Array; previewId: number | null } {
+    const audio = new Float32Array(this.bufLen);
     let o = 0;
     for (const p of this.pieces) {
-      all.set(p, o);
+      audio.set(p, o);
       o += p.length;
     }
     this.pieces = [];
     this.bufLen = 0;
-    return all;
+    const previewId = this.previewGen === this.gen ? (this.preview?.id ?? null) : null;
+    this.gen++;
+    this.lastPreviewLen = 0;
+    return { audio, previewId };
   }
 
-  private enqueue(chunk: Float32Array) {
+  private enqueue(chunk: Float32Array, previewId: number | null) {
     if (chunk.length === 0) return;
     // An unmodulated carrier or dead air is silence after demod — skip it.
     let e = 0;
     for (let i = 0; i < chunk.length; i++) e += chunk[i]! * chunk[i]!;
-    if (Math.sqrt(e / chunk.length) < SILENCE_RMS) return;
+    if (Math.sqrt(e / chunk.length) < SILENCE_RMS) {
+      this.promotePreview(previewId); // can't happen with a real preview, but don't dangle
+      return;
+    }
 
     this.queue.push({
       pcm: floatToInt16(chunk),
       freqHz: this.bufFreqHz,
       time: Date.now(),
       durationS: chunk.length / WHISPER_RATE,
+      previewId,
     });
     if (this.queue.length > QUEUE_MAX) {
-      this.queue.shift();
+      const dropped = this.queue.shift()!;
+      this.tombstone(dropped);
       console.warn("[transcribe] whisper can't keep up — dropping oldest chunk");
       // Surface it (model too big for the machine?) — but not while the model
       // is still loading, where a backlog is normal and clears once ready.
       if (this.currentStatus === "ready") this.setStatus("lagging");
     }
     this.pump();
+  }
+
+  /** Keep a preview the user already saw as the final text (used when its
+   *  utterance ends without a full-quality re-transcription). */
+  private promotePreview(previewId: number | null) {
+    if (previewId == null || this.preview?.id !== previewId) return;
+    const segment: TranscriptSegment = { ...this.preview, final: true };
+    this.preview = null;
+    this.pushHistory(segment);
+    this.hooks.emit([segment]);
+  }
+
+  /** Append to the late-joiner history, replacing any same-id entry (a final
+   *  superseding a promoted preview) and keeping the cap. */
+  private pushHistory(segment: TranscriptSegment) {
+    this.history = this.history.filter((s) => s.id !== segment.id);
+    this.history.push(segment);
+    if (this.history.length > HISTORY_MAX) {
+      this.history.splice(0, this.history.length - HISTORY_MAX);
+    }
+  }
+
+  /** The utterance produced nothing usable — tell clients to remove its
+   *  preview (an empty-text final is the removal marker). */
+  private tombstone(job: PendingChunk) {
+    if (job.previewId == null) return;
+    if (this.preview?.id === job.previewId) this.preview = null;
+    this.hooks.emit([
+      {
+        id: job.previewId,
+        time: job.time,
+        text: "",
+        freqHz: job.freqHz,
+        durationS: Math.round(job.durationS * 10) / 10,
+        final: true,
+      },
+    ]);
   }
 
   // --- inference ------------------------------------------------------------
@@ -364,24 +442,29 @@ export class Transcriber {
     if (!job) return;
     this.inFlight = true;
     this.transcribe(job)
-      .catch((err) => console.warn(`[transcribe] inference failed: ${err}`))
+      .catch((err) => {
+        console.warn(`[transcribe] inference failed: ${err}`);
+        this.tombstone(job); // its preview can't be replaced any more
+      })
       .finally(() => {
         this.inFlight = false;
         this.pump();
       });
   }
 
-  private async transcribe(job: PendingChunk) {
+  /** POST one PCM chunk to the child and return the trustworthy text ("" when
+   *  whisper found nothing usable). Shared by finals and previews. */
+  private async postChunk(pcm: Int16Array, freqHz: number): Promise<string> {
     const form = new FormData();
     form.append(
       "file",
-      new Blob([wavBytes(job.pcm, WHISPER_RATE)], { type: "audio/wav" }),
+      new Blob([wavBytes(pcm, WHISPER_RATE)], { type: "audio/wav" }),
       "chunk.wav",
     );
     form.append("response_format", "verbose_json");
     // Prime whisper with the station's own recent text so names and spelling
     // stay consistent across chunk boundaries.
-    if (this.context && job.freqHz === this.contextFreqHz) {
+    if (this.context && freqHz === this.contextFreqHz) {
       form.append("prompt", this.context);
     }
 
@@ -406,33 +489,92 @@ export class Transcriber {
       segments?: WhisperSegment[];
     };
     if (body.error) throw new Error(body.error);
+    return usableText(body);
+  }
+
+  private async transcribe(job: PendingChunk) {
+    const text = await this.postChunk(job.pcm, job.freqHz);
 
     // Caught up after falling behind — the queue has drained.
     if (this.currentStatus === "lagging" && this.queue.length === 0) {
       this.setStatus("ready");
     }
 
-    const text = usableText(body);
-    if (!text) return;
     // Identical back-to-back chunks are almost always a hallucination loop
     // (whisper latching onto music or noise), not a station repeating itself.
-    if (text === this.lastText) return;
+    if (!text || text === this.lastText) {
+      this.tombstone(job);
+      return;
+    }
     this.lastText = text;
     this.context = text.slice(-PROMPT_MAX_CHARS);
     this.contextFreqHz = job.freqHz;
 
     const segment: TranscriptSegment = {
-      id: this.nextId++,
+      id: job.previewId ?? this.nextId++,
       time: job.time,
       text,
       freqHz: job.freqHz,
       durationS: Math.round(job.durationS * 10) / 10,
+      final: true,
     };
-    this.history.push(segment);
-    if (this.history.length > HISTORY_MAX) {
-      this.history.splice(0, this.history.length - HISTORY_MAX);
-    }
+    if (this.preview?.id === segment.id) this.preview = null;
+    this.pushHistory(segment);
     this.hooks.emit([segment]);
+  }
+
+  // --- live preview of the open utterance ------------------------------------
+
+  /** Re-transcribe the open buffer when whisper is idle and PREVIEW_STEP_S of
+   *  new audio has arrived, so text appears while the utterance is still being
+   *  spoken. Finals always win the slot: a queued chunk suppresses previews. */
+  private maybePreview() {
+    if (!this.ready || this.inFlight || this.queue.length > 0) return;
+    if (this.bufLen < this.lastPreviewLen + PREVIEW_STEP_S * WHISPER_RATE) return;
+    this.lastPreviewLen = this.bufLen;
+    const audio = this.peekBuffer();
+    const gen = this.gen;
+    const freqHz = this.bufFreqHz;
+    this.inFlight = true;
+    this.runPreview(audio, freqHz, gen)
+      .catch((err) => console.warn(`[transcribe] preview failed: ${err}`))
+      .finally(() => {
+        this.inFlight = false;
+        this.pump();
+      });
+  }
+
+  private async runPreview(audio: Float32Array, freqHz: number, gen: number) {
+    const text = await this.postChunk(floatToInt16(audio), freqHz);
+    // The utterance was cut/flushed while we were transcribing — the result
+    // describes audio that a final (with the cut's exact bounds) now owns.
+    if (gen !== this.gen || !this.wantRunning) return;
+    if (!text) return;
+    const id = this.previewGen === gen && this.preview ? this.preview.id : this.nextId++;
+    const segment: TranscriptSegment = {
+      id,
+      time: Date.now(),
+      text,
+      freqHz,
+      durationS: Math.round((audio.length / WHISPER_RATE) * 10) / 10,
+      final: false,
+    };
+    this.preview = segment;
+    this.previewGen = gen;
+    this.hooks.emit([segment]);
+  }
+
+  /** The open buffer's contents, coalesced without ending the utterance. */
+  private peekBuffer(): Float32Array {
+    if (this.pieces.length === 1) return this.pieces[0]!;
+    const all = new Float32Array(this.bufLen);
+    let o = 0;
+    for (const p of this.pieces) {
+      all.set(p, o);
+      o += p.length;
+    }
+    this.pieces = [all]; // keep the coalesced form; later feeds append after it
+    return all;
   }
 
   /** A request timed out: the child may be wedged (it would otherwise hold the
