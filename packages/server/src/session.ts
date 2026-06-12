@@ -179,6 +179,7 @@ export class Radio {
         this.client?.setFrequency(msg.hz);
         this.syncNotches();
         this.demod.resetRds(); // different station — drop the old RDS data
+        this.demod.resetTone();
         this.squelch.reset(); // ...and its power estimate
         break;
       case "setSampleRate":
@@ -242,6 +243,9 @@ export class Radio {
       case "setSquelch":
         this.state.squelchDb = msg.db;
         break;
+      case "setToneSquelch":
+        this.state.toneSquelch = msg.tone;
+        break;
       case "setPpm":
         this.state.ppm = msg.ppm;
         this.client?.setFreqCorrection(msg.ppm);
@@ -259,6 +263,7 @@ export class Radio {
         this.vfo.setFreq(-msg.hz); // bring the VFO down to DC
         this.syncNotches();
         this.demod.resetRds(); // tuned to a different station within the band
+        this.demod.resetTone();
         this.squelch.reset();
         break;
       case "setAdsb":
@@ -525,12 +530,13 @@ export class Radio {
     if (this.scanner.active) this.scanner.onPower(powerDb, now);
 
     const dt = iq.length / 2 / this.state.sampleRate;
-    const squelchOpen = this.squelch.update(
+    const carrierOpen = this.squelch.update(
       powerDb,
       this.state.squelchDb,
       dt,
       now,
     );
+    const squelchOpen = carrierOpen && this.toneSquelchOpen();
     // While scanning, only pass audio once parked on an active channel, so we
     // don't blast noise from every silent channel we step across.
     const open = squelchOpen && (!this.scanner.active || this.scanHolding);
@@ -550,6 +556,7 @@ export class Radio {
         type: "signal",
         channelDb: this.squelch.levelDb,
         squelchOpen: squelchOpen,
+        tone: this.demod.detectedTone(),
       });
     }
 
@@ -566,6 +573,13 @@ export class Radio {
         stats: this.demod.rdsStats(),
       });
     }
+  }
+
+  /** Tone-squelch verdict: open unless an NFM CTCSS/DCS requirement is unmet. */
+  private toneSquelchOpen(): boolean {
+    const want = this.state.toneSquelch;
+    if (want == null || this.state.mode !== "NFM") return true;
+    return this.demod.toneMatches(want);
   }
 
   private broadcastState() {

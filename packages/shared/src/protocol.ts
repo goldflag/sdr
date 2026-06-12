@@ -41,6 +41,14 @@ export const AGC_MODES = ["off", "fast", "medium", "slow"] as const;
 export type AgcMode = (typeof AGC_MODES)[number];
 
 /**
+ * Sub-audible tone selector (NFM): a CTCSS tone or a DCS code. Used both as
+ * the required tone-squelch setting and as the decoder's detection report.
+ */
+export type ToneSquelch =
+  | { kind: "ctcss"; hz: number }
+  | { kind: "dcs"; code: number; inverted: boolean };
+
+/**
  * Default channel filter edges (Hz, relative to the tuned VFO) for a mode at a
  * given bandwidth. SSB is single-sided; CW sits around the CW beat tone; AM/FM
  * are symmetric. Edges can then be dragged independently (passband tuning).
@@ -237,6 +245,8 @@ export type ClientMessage =
   | { type: "setGain"; mode: "auto" | "manual"; db?: number }
   /** Squelch threshold in dB of channel power; null disables squelch. */
   | { type: "setSquelch"; db: number | null }
+  /** Require a CTCSS tone / DCS code to open the squelch (NFM); null disables. */
+  | { type: "setToneSquelch"; tone: ToneSquelch | null }
   | { type: "setPpm"; ppm: number }
   | { type: "setBiasTee"; on: boolean }
   | { type: "setDirectSampling"; value: DirectSampling }
@@ -487,6 +497,8 @@ export interface RadioState {
   gainMode: "auto" | "manual";
   gainDb: number;
   squelchDb: number | null;
+  /** Required sub-audible tone (CTCSS/DCS) for the squelch to open (NFM only). */
+  toneSquelch: ToneSquelch | null;
   ppm: number;
   biasTee: boolean;
   directSampling: DirectSampling;
@@ -533,8 +545,14 @@ export type ServerMessage =
   | { type: "hello"; protocol: number }
   | { type: "deviceInfo"; info: DeviceInfo }
   | { type: "state"; state: RadioState }
-  /** Channel signal level in dB, for squelch UI / S-meter. */
-  | { type: "signal"; channelDb: number; squelchOpen: boolean }
+  /** Channel signal level in dB, for squelch UI / S-meter. `tone` is the
+   *  sub-audible tone currently decoded on the channel (NFM only). */
+  | {
+      type: "signal";
+      channelDb: number;
+      squelchOpen: boolean;
+      tone: ToneSquelch | null;
+    }
   /** Periodic ADS-B aircraft table snapshot (only while ADS-B is on). */
   | { type: "adsb"; aircraft: AircraftReport[]; messageRate: number }
   /**
@@ -707,6 +725,7 @@ export const DEFAULT_STATE: RadioState = {
   gainMode: "auto",
   gainDb: 0,
   squelchDb: null,
+  toneSquelch: null,
   ppm: 0,
   biasTee: false,
   directSampling: DIRECT_SAMPLING.OFF,

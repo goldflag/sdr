@@ -16,6 +16,7 @@ import {
   type ScanStatus,
   type ServerMessage,
   type StationReport,
+  type ToneSquelch,
   type TranscriptSegment,
   type VesselReport,
   BinaryFrameType,
@@ -41,6 +42,8 @@ const SEND_QUEUE_MAX = 64;
 export interface SignalState {
   channelDb: number;
   squelchOpen: boolean;
+  /** Sub-audible tone (CTCSS/DCS) currently decoded on the channel, if any. */
+  tone: ToneSquelch | null;
 }
 
 export interface IsmStats {
@@ -187,7 +190,11 @@ export function useRadio() {
           if (!protocolMismatch) setError(null);
           break;
         case "signal":
-          setSignal({ channelDb: msg.channelDb, squelchOpen: msg.squelchOpen });
+          setSignal({
+            channelDb: msg.channelDb,
+            squelchOpen: msg.squelchOpen,
+            tone: msg.tone,
+          });
           break;
         case "adsb":
           setAircraft(msg.aircraft);

@@ -12,7 +12,8 @@
     "test:ais": "bun run src/dsp/ais-selftest.ts",
     "test:aprs": "bun run src/dsp/aprs-selftest.ts",
     "test:rds": "bun run src/dsp/rds-selftest.ts",
-    "test:squelch": "bun run src/dsp/squelch-selftest.ts"
+    "test:squelch": "bun run src/dsp/squelch-selftest.ts",
+    "test:tone": "bun run src/dsp/tone-selftest.ts"
   },
   "dependencies": {
     "@sdr/shared": "workspace:*",

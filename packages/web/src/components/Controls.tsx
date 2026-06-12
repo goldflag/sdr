@@ -5,9 +5,13 @@ import {
   type DeviceInfo,
   type Mode,
   type RadioState,
+  type ToneSquelch,
   AGC_MODES,
+  CTCSS_TONES,
+  DCS_SELECTABLE,
   DIRECT_SAMPLING,
   SAMPLE_RATES,
+  dcsName,
 } from "@sdr/shared";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
@@ -157,6 +161,14 @@ export function Controls(p: Props) {
             />
           )}
         </div>
+
+        {state.mode === "NFM" && (
+          <ToneSquelchControl
+            tone={state.toneSquelch}
+            heard={signal?.tone ?? null}
+            send={send}
+          />
+        )}
       </Section>
 
       <Section title="Noise &amp; dynamics">
@@ -493,6 +505,126 @@ export function InfoTip({ children }: { children: ReactNode }) {
       </TooltipTrigger>
       <TooltipContent>{children}</TooltipContent>
     </Tooltip>
+  );
+}
+
+function toneLabel(t: ToneSquelch): string {
+  return t.kind === "ctcss" ? `${t.hz.toFixed(1)} Hz` : dcsName(t.code, t.inverted);
+}
+
+const TONE_CHIP =
+  "rounded border border-border px-1.5 font-mono text-[10px] leading-5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground motion-reduce:transition-none";
+
+function ToneSquelchControl({
+  tone,
+  heard,
+  send,
+}: {
+  tone: ToneSquelch | null;
+  heard: ToneSquelch | null;
+  send: (msg: ClientMessage) => void;
+}) {
+  const set = (t: ToneSquelch | null) =>
+    send({ type: "setToneSquelch", tone: t });
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between">
+        <Label className="flex items-center gap-1 text-xs">
+          Tone squelch
+          <InfoTip>
+            Opens only for transmissions carrying the selected sub-audible
+            CTCSS tone or DCS code, so a shared channel stays quiet until your
+            group keys up. The tone decoded from the current signal appears
+            below — click it to select it.
+          </InfoTip>
+        </Label>
+        <Select
+          value={tone?.kind ?? "off"}
+          onValueChange={(v) => {
+            if (v === "off") set(null);
+            else if (v === "ctcss")
+              set(heard?.kind === "ctcss" ? heard : { kind: "ctcss", hz: 100 });
+            else
+              set(
+                heard?.kind === "dcs"
+                  ? heard
+                  : { kind: "dcs", code: DCS_SELECTABLE[0]!, inverted: false },
+              );
+          }}
+        >
+          <SelectTrigger className="h-6 w-24 px-2 text-[11px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="off">off</SelectItem>
+            <SelectItem value="ctcss">CTCSS</SelectItem>
+            <SelectItem value="dcs">DCS</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      {tone?.kind === "ctcss" && (
+        <Select
+          value={tone.hz.toFixed(1)}
+          onValueChange={(v) => set({ kind: "ctcss", hz: Number(v) })}
+        >
+          <SelectTrigger className={SELECT_TRIGGER}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {CTCSS_TONES.map((hz) => (
+              <SelectItem key={hz} value={hz.toFixed(1)}>
+                {hz.toFixed(1)} Hz
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
+
+      {tone?.kind === "dcs" && (
+        <div className="flex items-center gap-2">
+          <Select
+            value={String(tone.code)}
+            onValueChange={(v) => set({ ...tone, code: Number(v) })}
+          >
+            <SelectTrigger className={SELECT_TRIGGER}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {DCS_SELECTABLE.map((code) => (
+                <SelectItem key={code} value={String(code)}>
+                  {dcsName(code, tone.inverted)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <button
+            type="button"
+            className={TONE_CHIP}
+            title="Code polarity: normal (N) or inverted (I)"
+            onClick={() => set({ ...tone, inverted: !tone.inverted })}
+          >
+            {tone.inverted ? "I" : "N"}
+          </button>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="text-muted-foreground">Tone heard</span>
+        {heard ? (
+          <button
+            type="button"
+            className={TONE_CHIP}
+            title="Use this tone for the tone squelch"
+            onClick={() => set(heard)}
+          >
+            {toneLabel(heard)}
+          </button>
+        ) : (
+          <span className="font-mono text-muted-foreground/60">—</span>
+        )}
+      </div>
+    </div>
   );
 }
 

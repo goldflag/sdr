@@ -104,6 +104,19 @@ export const ClientMessageSchema = z.discriminatedUnion("type", [
     db: finite.optional(),
   }),
   z.object({ type: z.literal("setSquelch"), db: finite.nullable() }),
+  z.object({
+    type: z.literal("setToneSquelch"),
+    tone: z
+      .discriminatedUnion("kind", [
+        z.object({ kind: z.literal("ctcss"), hz: finite.positive() }),
+        z.object({
+          kind: z.literal("dcs"),
+          code: z.number().int().min(0).max(0o777),
+          inverted: z.boolean(),
+        }),
+      ])
+      .nullable(),
+  }),
   z.object({ type: z.literal("setPpm"), ppm: finite }),
   onMsg("setBiasTee"),
   z.object({ type: z.literal("setDirectSampling"), value: directSampling }),

@@ -17,7 +17,7 @@
 // VFO, so the passband can be tuned/shifted asymmetrically. AM/SSB/CW share one
 // "shift to passband centre, low-pass the half-width, shift back" core.
 
-import type { AgcMode, Mode } from "@sdr/shared";
+import type { AgcMode, Mode, ToneSquelch } from "@sdr/shared";
 import { AUDIO_RATE } from "@sdr/shared";
 import {
   ComplexDecimator,
@@ -30,6 +30,7 @@ import { LinearResampler } from "./resample";
 import { Nco } from "./nco";
 import { AudioAgc, LmsDenoiser, NoiseBlanker } from "./enhance";
 import { RdsDecoder } from "./rds";
+import { ToneDecoder } from "./tone";
 import type { RdsStation, RdsStats } from "@sdr/shared";
 
 /** Target intermediate (channel) rate per mode, before final resample to 48k. */
@@ -91,6 +92,8 @@ export class Demodulator {
 
   // RDS data decoder, fed the WFM multiplex (MPX) before de-emphasis.
   private rds = new RdsDecoder();
+  // CTCSS/DCS decoder, fed the NFM discriminator output (sub-audible band).
+  private tone = new ToneDecoder();
 
   constructor() {
     const bw = 200_000;
@@ -137,6 +140,10 @@ export class Demodulator {
     // RDS runs on the WFM multiplex at the channel rate; (re)configuring it also
     // clears any station decoded for the previous tuning.
     this.rds.configure(this.channelRate);
+
+    // CTCSS/DCS rides the NFM discriminator output; (re)configuring clears any
+    // tone detected for the previous tuning.
+    this.tone.configure(this.channelRate);
 
     // Generalised Weaver passband: shift centre -> DC, low-pass ±width/2.
     this.passDown = new Nco(this.channelRate, -center);
@@ -202,6 +209,21 @@ export class Demodulator {
     return this.rds.diag();
   }
 
+  // --- CTCSS/DCS (sub-audible tone, NFM) ---
+
+  /** The sub-audible tone currently decoded on the channel, or null. */
+  detectedTone(): ToneSquelch | null {
+    return this.mode === "NFM" ? this.tone.detected() : null;
+  }
+  /** Whether the required tone-squelch tone is present right now. */
+  toneMatches(want: ToneSquelch): boolean {
+    return this.tone.matches(want);
+  }
+  /** Drop tone detection state (call on retune within a band). */
+  resetTone() {
+    this.tone.reset();
+  }
+
   /** `iq` is interleaved complex at fs, signal of interest centered at DC. */
   process(iq: Float32Array): DemodResult {
     const ch = this.decim.process(iq); // interleaved complex at channelRate
@@ -255,6 +277,12 @@ export class Demodulator {
     }
     this.prevI = pI;
     this.prevQ = pQ;
+
+    if (this.mode === "NFM") {
+      // Sub-audible CTCSS/DCS lives in the raw discriminator output below the
+      // voice band — feed it to the tone decoder before any audio shaping.
+      this.tone.process(out, n);
+    }
 
     if (this.mode === "WFM") {
       // The raw discriminator output is the full FM multiplex — feed it to the
