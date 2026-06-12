@@ -224,6 +224,8 @@ export default function App() {
                 on={state.transcribe}
                 available={state.transcribeAvailable}
                 model={state.transcribeModel}
+                models={state.transcribeModels}
+                status={state.transcribeStatus}
                 send={radio.send}
               />
               <SpectrumDisplay display={display} onChange={ui.setDisplay} />

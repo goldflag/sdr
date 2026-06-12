@@ -22,8 +22,9 @@ Optional (features disable themselves when missing):
     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
   ```
 
-  The largest model found is used (override with `WHISPER_MODEL=/path/to.bin`;
-  `WHISPER_LANG=auto` for non-English stations). Dropping a Silero VAD model
+  Pick between downloaded models in the transcript panel (the largest is the
+  default; `WHISPER_MODEL=/path/to.bin` overrides, `WHISPER_LANG=auto` for
+  non-English stations). Dropping a Silero VAD model
   (`ggml-silero-*.bin`) alongside it makes whisper skip music instead of
   hallucinating lyrics over it.
 

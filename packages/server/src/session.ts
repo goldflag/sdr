@@ -55,9 +55,13 @@ export class Radio {
   private spectrum = new SpectrumAnalyzer(FFT_SIZE);
   private demod = new Demodulator();
   private ism = new IsmReceiver();
-  private transcriber = new Transcriber((segments) =>
-    this.sinks.json({ type: "transcript", segments }),
-  );
+  private transcriber = new Transcriber({
+    emit: (segments) => this.sinks.json({ type: "transcript", segments }),
+    status: (status) => {
+      this.state.transcribeStatus = status;
+      this.broadcastState();
+    },
+  });
   private layers: MapLayerScheduler;
   private scanner = new Scanner({
     tune: (e) => this.scanTune(e),
@@ -88,7 +92,7 @@ export class Radio {
     // Likewise transcription is delegated to whisper.cpp — the toggle is only
     // offered when the whisper-server binary and a ggml model are both found.
     this.state.transcribeAvailable = Transcriber.available();
-    this.state.transcribeModel = Transcriber.modelName();
+    this.refreshTranscribeModels();
     this.conn = new RtlTcpConnection({
       onUp: (h) => {
         this.deviceInfo = {
@@ -270,9 +274,17 @@ export class Radio {
         else this.exitIsm();
         break;
       case "setTranscribe":
+        // Models may have been added/removed since startup — rescan on enable.
+        if (msg.on) this.refreshTranscribeModels();
         this.state.transcribe = msg.on && this.state.transcribeAvailable;
         if (this.state.transcribe) this.transcriber.start();
         else this.transcriber.stop();
+        break;
+      case "setTranscribeModel":
+        if (this.state.transcribeModels.includes(msg.model)) {
+          this.state.transcribeModel = msg.model;
+          this.transcriber.setModel(msg.model);
+        }
         break;
       case "setIsmFreq":
         this.state.ismFreqHz = msg.hz;
@@ -325,6 +337,15 @@ export class Radio {
     s.gainDb = this.preDecode.gainDb;
     s.directSampling = this.preDecode.directSampling;
     this.preDecode = null;
+  }
+
+  /** Rescan the model directories, keeping the user's pick when still valid. */
+  private refreshTranscribeModels() {
+    const models = Transcriber.listModels();
+    this.state.transcribeModels = models.map((m) => m.name);
+    if (!models.some((m) => m.name === this.state.transcribeModel)) {
+      this.state.transcribeModel = models[0]?.name ?? null;
+    }
   }
 
   /** Tune to max gain (digital decode modes are reception-limited). */

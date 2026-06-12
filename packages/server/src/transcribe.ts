@@ -24,7 +24,7 @@ import type { Subprocess } from "bun";
 import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, basename } from "node:path";
-import type { TranscriptSegment } from "@sdr/shared";
+import type { TranscriptSegment, TranscribeStatus } from "@sdr/shared";
 import { AUDIO_RATE } from "@sdr/shared";
 import { designLowpass, RealFir } from "./dsp/filters";
 import { LinearResampler, floatToInt16 } from "./dsp/resample";
@@ -55,6 +55,24 @@ const HISTORY_MAX = 200;
 /** Chunks quieter than this RMS (~ -60 dBFS) are silence — skip inference. */
 const SILENCE_RMS = 1e-3;
 
+// Per-segment confidence gates on the verbose_json response. Whisper reports
+// both "this probably isn't speech" (no_speech_prob) and "I'm guessing"
+// (avg_logprob) — hallucinations over music/noise score high on one or both,
+// e.g. white noise transcribes as "(water running)" with no_speech_prob ≈ 0.8
+// while real speech sits near 0.
+const NO_SPEECH_THRESHOLD = 0.6;
+const LOGPROB_THRESHOLD = -1.0;
+
+/** Previous transcript text fed back as whisper's prompt, so names and
+ *  spelling stay consistent across chunks (≲ whisper's 224-token cap). */
+const PROMPT_MAX_CHARS = 600;
+
+// A wedged child would otherwise hold `inFlight` forever and silently stop
+// transcription. Time the request out, and after consecutive timeouts kill
+// the child — the respawn logic brings up a fresh one.
+const INFERENCE_TIMEOUT_MS = 60_000;
+const MAX_CONSECUTIVE_TIMEOUTS = 2;
+
 // Model loading is slow (seconds; first Core ML run can be much longer) — poll
 // the child's HTTP port until it answers before sending work.
 const READY_TIMEOUT_MS = 90_000;
@@ -71,6 +89,20 @@ interface PendingChunk {
   freqHz: number;
   time: number; // epoch ms when the chunk ended
   durationS: number;
+}
+
+/** One segment of whisper-server's verbose_json response. */
+interface WhisperSegment {
+  text?: string;
+  avg_logprob?: number;
+  no_speech_prob?: number;
+}
+
+export interface TranscriberHooks {
+  /** Newly transcribed segments, ready to broadcast. */
+  emit: (segments: TranscriptSegment[]) => void;
+  /** Engine lifecycle changes (loading / ready / lagging / failed / off). */
+  status: (status: TranscribeStatus) => void;
 }
 
 export class Transcriber {
@@ -102,7 +134,24 @@ export class Transcriber {
   private nextId = 1;
   private lastText = "";
 
-  constructor(private emit: (segments: TranscriptSegment[]) => void) {}
+  // Rolling transcript context used as whisper's prompt; only applied to
+  // chunks from the same station, so one station's text can't prime another's.
+  private context = "";
+  private contextFreqHz = 0;
+
+  /** Model picked via the UI; null means "largest found". */
+  private preferredModel: string | null = null;
+
+  private currentStatus: TranscribeStatus = "off";
+  private consecutiveTimeouts = 0;
+
+  constructor(private hooks: TranscriberHooks) {}
+
+  private setStatus(status: TranscribeStatus) {
+    if (status === this.currentStatus) return;
+    this.currentStatus = status;
+    this.hooks.status(status);
+  }
 
   /** Absolute path to the whisper-server binary, or null if not installed.
    *  Reads the live PATH explicitly — Bun.which() otherwise snapshots it at
@@ -113,21 +162,37 @@ export class Transcriber {
     return Bun.which("whisper-server", { PATH: process.env.PATH ?? "" });
   }
 
-  /** Best ggml model found, or null. Searches WHISPER_MODEL, then ggml-*.bin
-   *  in WHISPER_MODEL_DIR, ./models and ~/.cache/whisper.cpp, preferring the
-   *  largest file (bigger model = better transcription). */
-  static findModel(): { path: string; name: string } | null {
-    const explicit = process.env.WHISPER_MODEL;
-    if (explicit && isFile(explicit)) {
-      return { path: resolve(explicit), name: modelName(explicit) };
-    }
-    let best: { path: string; size: number } | null = null;
+  /** Every speech model found (ggml-*.bin in WHISPER_MODEL_DIR, ./models and
+   *  ~/.cache/whisper.cpp), largest first. A WHISPER_MODEL override is listed
+   *  first regardless of size. First hit wins for duplicate names. */
+  static listModels(): { path: string; name: string; size: number }[] {
+    const out: { path: string; name: string; size: number }[] = [];
+    const seen = new Set<string>();
+    const add = (file: string) => {
+      const name = modelName(file);
+      const size = fileSize(file);
+      if (size > 0 && !seen.has(name)) {
+        seen.add(name);
+        out.push({ path: resolve(file), name, size });
+      }
+    };
     for (const file of candidateModels()) {
       if (/silero|vad/i.test(basename(file))) continue; // VAD models aren't speech models
-      const size = fileSize(file);
-      if (size > 0 && (!best || size > best.size)) best = { path: file, size };
+      add(file);
     }
-    return best ? { path: best.path, name: modelName(best.path) } : null;
+    out.sort((a, b) => b.size - a.size);
+    const explicit = process.env.WHISPER_MODEL;
+    if (explicit && isFile(explicit)) {
+      const name = modelName(explicit);
+      const rest = out.filter((m) => m.name !== name);
+      return [{ path: resolve(explicit), name, size: fileSize(explicit) }, ...rest];
+    }
+    return out;
+  }
+
+  /** Default model (the WHISPER_MODEL override or the largest found). */
+  static findModel(): { path: string; name: string } | null {
+    return Transcriber.listModels()[0] ?? null;
   }
 
   /** Silero VAD model, if one is present — lets whisper skip music/static
@@ -153,6 +218,20 @@ export class Transcriber {
     return this.history;
   }
 
+  /** Switch to another model by name. If running, the child is swapped out
+   *  for one loading the new model (status goes loading → ready). */
+  setModel(name: string) {
+    if (name === this.preferredModel) return;
+    this.preferredModel = name;
+    if (!this.wantRunning) return;
+    this.ready = false;
+    this.rapidRestarts = 0;
+    const proc = this.proc;
+    this.proc = null; // detach first so onExit doesn't treat this as a crash
+    proc?.kill();
+    this.spawn();
+  }
+
   /** Spawn whisper-server and start accepting audio. No-op if running. */
   start() {
     if (this.wantRunning) return;
@@ -174,6 +253,8 @@ export class Transcriber {
   stop() {
     this.wantRunning = false;
     this.ready = false;
+    this.consecutiveTimeouts = 0;
+    this.setStatus("off");
     if (this.respawnTimer) {
       clearTimeout(this.respawnTimer);
       this.respawnTimer = null;
@@ -268,6 +349,9 @@ export class Transcriber {
     if (this.queue.length > QUEUE_MAX) {
       this.queue.shift();
       console.warn("[transcribe] whisper can't keep up — dropping oldest chunk");
+      // Surface it (model too big for the machine?) — but not while the model
+      // is still loading, where a backlog is normal and clears once ready.
+      if (this.currentStatus === "ready") this.setStatus("lagging");
     }
     this.pump();
   }
@@ -294,21 +378,48 @@ export class Transcriber {
       new Blob([wavBytes(job.pcm, WHISPER_RATE)], { type: "audio/wav" }),
       "chunk.wav",
     );
-    form.append("response_format", "json");
-    const res = await fetch(`http://127.0.0.1:${this.port}/inference`, {
-      method: "POST",
-      body: form,
-    });
+    form.append("response_format", "verbose_json");
+    // Prime whisper with the station's own recent text so names and spelling
+    // stay consistent across chunk boundaries.
+    if (this.context && job.freqHz === this.contextFreqHz) {
+      form.append("prompt", this.context);
+    }
+
+    let res: Response;
+    try {
+      res = await fetch(`http://127.0.0.1:${this.port}/inference`, {
+        method: "POST",
+        body: form,
+        signal: AbortSignal.timeout(INFERENCE_TIMEOUT_MS),
+      });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "TimeoutError") {
+        this.onInferenceTimeout();
+      }
+      throw err;
+    }
+    this.consecutiveTimeouts = 0;
     if (!res.ok) throw new Error(`whisper-server HTTP ${res.status}`);
-    const body = (await res.json()) as { text?: string; error?: string };
+    const body = (await res.json()) as {
+      text?: string;
+      error?: string;
+      segments?: WhisperSegment[];
+    };
     if (body.error) throw new Error(body.error);
 
-    const text = cleanText(body.text ?? "");
+    // Caught up after falling behind — the queue has drained.
+    if (this.currentStatus === "lagging" && this.queue.length === 0) {
+      this.setStatus("ready");
+    }
+
+    const text = usableText(body);
     if (!text) return;
     // Identical back-to-back chunks are almost always a hallucination loop
     // (whisper latching onto music or noise), not a station repeating itself.
     if (text === this.lastText) return;
     this.lastText = text;
+    this.context = text.slice(-PROMPT_MAX_CHARS);
+    this.contextFreqHz = job.freqHz;
 
     const segment: TranscriptSegment = {
       id: this.nextId++,
@@ -321,19 +432,45 @@ export class Transcriber {
     if (this.history.length > HISTORY_MAX) {
       this.history.splice(0, this.history.length - HISTORY_MAX);
     }
-    this.emit([segment]);
+    this.hooks.emit([segment]);
+  }
+
+  /** A request timed out: the child may be wedged (it would otherwise hold the
+   *  single inference slot forever). After a second strike, kill it and let
+   *  the respawn logic bring up a fresh one. */
+  private onInferenceTimeout() {
+    this.consecutiveTimeouts++;
+    console.warn(`[transcribe] inference timed out (${this.consecutiveTimeouts})`);
+    if (this.consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS && this.proc) {
+      console.warn("[transcribe] whisper-server unresponsive — restarting it");
+      this.consecutiveTimeouts = 0;
+      this.ready = false;
+      this.proc.kill(); // onExit fires with this.proc === p → maybeRespawn
+    }
   }
 
   // --- child lifecycle --------------------------------------------------------
 
+  /** The model to spawn with: the UI-picked one if it still exists, else the
+   *  default (WHISPER_MODEL override or largest found). */
+  private resolveModel(): { path: string; name: string } | null {
+    if (this.preferredModel) {
+      const picked = Transcriber.listModels().find((m) => m.name === this.preferredModel);
+      if (picked) return picked;
+    }
+    return Transcriber.findModel();
+  }
+
   private spawn() {
     if (this.proc) return;
     const bin = Transcriber.resolveServer();
-    const model = Transcriber.findModel();
+    const model = this.resolveModel();
     if (!bin || !model) {
       console.warn("[transcribe] whisper-server or model missing — cannot start");
+      this.setStatus("failed");
       return;
     }
+    this.setStatus("loading");
     this.port = Number(process.env.WHISPER_PORT) || freePort();
     const vad = Transcriber.findVadModel();
     const lang = process.env.WHISPER_LANG;
@@ -381,6 +518,7 @@ export class Transcriber {
         await fetch(`http://127.0.0.1:${this.port}/`, { method: "GET" });
         if (this.proc !== proc) return;
         this.ready = true;
+        this.setStatus("ready");
         console.log("[transcribe] whisper-server ready");
         this.pump();
         return;
@@ -392,6 +530,7 @@ export class Transcriber {
       console.warn("[transcribe] whisper-server never became ready — giving up");
       this.proc = null;
       proc.kill();
+      this.setStatus("failed");
     }
   }
 
@@ -403,8 +542,10 @@ export class Transcriber {
       console.warn(
         `[transcribe] whisper-server died ${MAX_RAPID_RESTARTS} times in a row — giving up until transcription is toggled again`,
       );
+      this.setStatus("failed");
       return;
     }
+    this.setStatus("loading"); // a restart is on its way
     this.rapidRestarts++;
     this.respawnTimer = setTimeout(() => {
       this.respawnTimer = null;
@@ -469,6 +610,21 @@ function freePort(): number {
   const port = listener.port;
   listener.stop(true);
   return port;
+}
+
+/** Extract the trustworthy text from a verbose_json response: drop segments
+ *  whisper itself scored as probably-not-speech or low-confidence (how
+ *  hallucinations over music, noise and dead air present), then strip
+ *  non-speech annotations. Falls back to the whole text when the response
+ *  carries no per-segment scores. */
+function usableText(body: { text?: string; segments?: WhisperSegment[] }): string {
+  if (!body.segments) return cleanText(body.text ?? "");
+  const kept = body.segments.filter(
+    (s) =>
+      (s.no_speech_prob ?? 0) <= NO_SPEECH_THRESHOLD &&
+      (s.avg_logprob ?? 0) >= LOGPROB_THRESHOLD,
+  );
+  return cleanText(kept.map((s) => s.text ?? "").join(" "));
 }
 
 /** Strip whisper's non-speech annotations; "" means nothing usable was said.

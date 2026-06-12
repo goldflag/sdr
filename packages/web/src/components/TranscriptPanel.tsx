@@ -1,28 +1,59 @@
 // Live transcript panel for the spectrum sidebar. The server pipes the
 // demodulated audio through a local whisper.cpp instance and pushes text
-// segments as they complete; this panel toggles the feature and shows the
-// rolling transcript. When the server lacks whisper-cpp or a model the toggle
-// is disabled and a short install hint is shown instead.
+// segments as they complete; this panel toggles the feature, picks the model,
+// shows the engine status and renders the rolling transcript. When the server
+// lacks whisper-cpp or a model the toggle is disabled and a short install
+// hint is shown instead.
 
 import { useEffect, useRef } from "react";
-import type { ClientMessage, TranscriptSegment } from "@sdr/shared";
+import type {
+  ClientMessage,
+  TranscribeStatus,
+  TranscriptSegment,
+} from "@sdr/shared";
 import { Captions } from "lucide-react";
 import { Section } from "@/components/Controls";
 import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface Props {
   segments: TranscriptSegment[];
   on: boolean;
   available: boolean;
-  /** Model name in use (e.g. "small.en"), or null when unavailable. */
+  /** Model in use (e.g. "small.en"), or null when unavailable. */
   model: string | null;
+  /** All models found on the server, largest first. */
+  models: string[];
+  status: TranscribeStatus;
   send: (msg: ClientMessage) => void;
 }
 
 /** Keep the list pinned to the newest line unless the user scrolled up. */
 const PIN_THRESHOLD_PX = 40;
 
-export function TranscriptPanel({ segments, on, available, model, send }: Props) {
+const STATUS_ASIDE: Record<TranscribeStatus, string | undefined> = {
+  off: undefined,
+  loading: "○ loading",
+  ready: "● live",
+  lagging: "▲ lagging",
+  failed: "✕ failed",
+};
+
+export function TranscriptPanel({
+  segments,
+  on,
+  available,
+  model,
+  models,
+  status,
+  send,
+}: Props) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const pinned = useRef(true);
 
@@ -32,7 +63,10 @@ export function TranscriptPanel({ segments, on, available, model, send }: Props)
   }, [segments.length]);
 
   return (
-    <Section title="Transcript · speech-to-text" aside={on ? (model ?? undefined) : undefined}>
+    <Section
+      title="Transcript · speech-to-text"
+      aside={on ? STATUS_ASIDE[status] : undefined}
+    >
       {!available ? (
         <p className="text-[11px] leading-snug text-muted-foreground">
           Transcribes the tuned station with a local whisper.cpp — nothing
@@ -56,7 +90,48 @@ export function TranscriptPanel({ segments, on, available, model, send }: Props)
             />
           </div>
 
-          {on && segments.length === 0 && (
+          {models.length > 0 && (
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-[11px] text-muted-foreground">Model</span>
+              <Select
+                value={model ?? undefined}
+                onValueChange={(m) =>
+                  send({ type: "setTranscribeModel", model: m })
+                }
+              >
+                <SelectTrigger className="h-7 w-[160px] px-2 font-mono text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {models.map((m) => (
+                    <SelectItem key={m} value={m} className="font-mono text-xs">
+                      {m}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
+          {on && status === "loading" && (
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <Captions className="size-3.5 animate-pulse" />
+              Loading the {model ?? ""} model…
+            </div>
+          )}
+          {on && status === "failed" && (
+            <p className="text-[11px] leading-snug text-destructive">
+              whisper-server failed to start — check the server logs, or try a
+              different model.
+            </p>
+          )}
+          {on && status === "lagging" && (
+            <p className="text-[11px] leading-snug text-amber-500">
+              Transcription can't keep up — oldest audio is being skipped. A
+              smaller model will run faster.
+            </p>
+          )}
+          {on && status === "ready" && segments.length === 0 && (
             <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
               <Captions className="size-3.5 animate-pulse" />
               Listening — text appears a few seconds behind live.

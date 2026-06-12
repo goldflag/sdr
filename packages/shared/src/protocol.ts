@@ -255,7 +255,9 @@ export type ClientMessage =
   /** Set the ISM centre frequency in Hz (315 / 434 / 868 / 915 MHz, …). */
   | { type: "setIsmFreq"; hz: number }
   /** Toggle live speech-to-text of the demodulated audio (via whisper.cpp). */
-  | { type: "setTranscribe"; on: boolean };
+  | { type: "setTranscribe"; on: boolean }
+  /** Pick the whisper model by name (must be one of state.transcribeModels). */
+  | { type: "setTranscribeModel"; model: string };
 
 // ---------------------------------------------------------------------------
 // Server -> Client (JSON status)
@@ -373,6 +375,22 @@ export interface IsmEvent {
   /** Burst signal level, dB above the noise floor. */
   snrDb: number;
 }
+
+/**
+ * Lifecycle of the transcription engine. `loading` while the whisper child
+ * loads its model (seconds); `lagging` when inference can't keep up with live
+ * audio and old chunks are being dropped; `failed` when the child couldn't
+ * start (or died repeatedly) — the panel surfaces each so a silent transcript
+ * is explainable.
+ */
+export const TRANSCRIBE_STATUSES = [
+  "off",
+  "loading",
+  "ready",
+  "lagging",
+  "failed",
+] as const;
+export type TranscribeStatus = (typeof TRANSCRIBE_STATUSES)[number];
 
 /** One transcribed chunk of demodulated audio (speech-to-text via whisper.cpp). */
 export interface TranscriptSegment {
@@ -493,6 +511,10 @@ export interface RadioState {
   transcribeAvailable: boolean;
   /** Name of the whisper model in use (e.g. "small.en"), null when unavailable. */
   transcribeModel: string | null;
+  /** All whisper models found on the server, largest first. */
+  transcribeModels: string[];
+  /** Transcription engine lifecycle, for the panel's status indicator. */
+  transcribeStatus: TranscribeStatus;
 }
 
 export type ServerMessage =
@@ -693,4 +715,6 @@ export const DEFAULT_STATE: RadioState = {
   transcribe: false,
   transcribeAvailable: false,
   transcribeModel: null,
+  transcribeModels: [],
+  transcribeStatus: "off",
 };
