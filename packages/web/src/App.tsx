@@ -214,20 +214,6 @@ export default function App() {
                 signal={radio.signal}
                 send={radio.send}
               />
-              <RdsPanel
-                station={radio.rdsStation}
-                stats={radio.rdsStats}
-                mode={state.mode}
-              />
-              <TranscriptPanel
-                segments={radio.transcripts}
-                on={state.transcribe}
-                available={state.transcribeAvailable}
-                model={state.transcribeModel}
-                models={state.transcribeModels}
-                status={state.transcribeStatus}
-                send={radio.send}
-              />
               <SpectrumDisplay display={display} onChange={ui.setDisplay} />
             </>
           )}
@@ -338,6 +324,27 @@ export default function App() {
             </div>
           )}
         </main>
+
+        {/* Read rail — decoded output (RDS, transcript), kept apart from the
+            control rail so live data never scrolls away behind settings. */}
+        {view === "spectrum" && (
+          <aside className="flex w-[300px] shrink-0 flex-col border-l bg-sidebar">
+            <RdsPanel
+              station={radio.rdsStation}
+              stats={radio.rdsStats}
+              mode={state.mode}
+            />
+            <TranscriptPanel
+              segments={radio.transcripts}
+              on={state.transcribe}
+              available={state.transcribeAvailable}
+              model={state.transcribeModel}
+              models={state.transcribeModels}
+              status={state.transcribeStatus}
+              send={radio.send}
+            />
+          </aside>
+        )}
       </div>
 
       <StatusBar

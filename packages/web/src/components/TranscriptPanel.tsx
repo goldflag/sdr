@@ -1,9 +1,11 @@
-// Live transcript panel for the spectrum sidebar. The server pipes the
-// demodulated audio through a local whisper.cpp instance and pushes text
-// segments as they complete; this panel toggles the feature, picks the model,
-// shows the engine status and renders the rolling transcript. When the server
-// lacks whisper-cpp or a model the toggle is disabled and a short install
-// hint is shown instead.
+// Live transcript panel for the read rail beside the spectrum. The server
+// pipes the demodulated audio through a local whisper.cpp instance and pushes
+// text segments as they complete; this panel toggles the feature, picks the
+// model, shows the engine status and renders the rolling transcript. It fills
+// the rail's remaining height below the RDS panel — the list grows with the
+// viewport instead of capping at a fixed height. When the server lacks
+// whisper-cpp or a model the toggle is disabled and a short install hint is
+// shown instead.
 
 import { useEffect, useRef } from "react";
 import type {
@@ -12,7 +14,6 @@ import type {
   TranscriptSegment,
 } from "@sdr/shared";
 import { Captions } from "lucide-react";
-import { Section } from "@/components/Controls";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -63,13 +64,26 @@ export function TranscriptPanel({
     if (el && pinned.current) el.scrollTop = el.scrollHeight;
   }, [segments]);
 
+  const aside = on ? STATUS_ASIDE[status] : undefined;
+
   return (
-    <Section
-      title="Transcript · speech-to-text"
-      aside={on ? STATUS_ASIDE[status] : undefined}
-    >
+    <section className="flex min-h-0 flex-1 flex-col">
+      {/* Header matches Section's typography; the icon sits where the
+          collapse chevron would, keeping titles aligned down the rail. */}
+      <div className="flex items-center gap-1.5 px-3 py-2">
+        <Captions className="size-3 shrink-0 text-muted-foreground" />
+        <h2 className="flex-1 text-[11px] font-semibold tracking-wide text-foreground/70">
+          Transcript · speech-to-text
+        </h2>
+        {aside && (
+          <span className="font-mono text-[11px] text-muted-foreground">
+            {aside}
+          </span>
+        )}
+      </div>
+
       {!available ? (
-        <p className="text-[11px] leading-snug text-muted-foreground">
+        <p className="px-3 pb-3 text-[11px] leading-snug text-muted-foreground">
           Transcribes the tuned station with a local whisper.cpp — nothing
           leaves this machine. To enable, install it and download a model:{" "}
           <span className="font-mono">brew install whisper-cpp</span>, then put
@@ -79,7 +93,7 @@ export function TranscriptPanel({
           the server.
         </p>
       ) : (
-        <div className="flex flex-col gap-2">
+        <div className="flex min-h-0 flex-1 flex-col gap-2 px-3 pb-3">
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-muted-foreground">
               Transcribe the tuned audio
@@ -148,7 +162,7 @@ export function TranscriptPanel({
                   el.scrollHeight - el.scrollTop - el.clientHeight <
                   PIN_THRESHOLD_PX;
               }}
-              className="scroll-thin flex max-h-56 flex-col gap-1.5 overflow-y-auto rounded bg-muted/30 px-2 py-1.5"
+              className="scroll-thin flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto rounded bg-muted/30 px-2 py-1.5"
             >
               {segments.map((s, i) => (
                 <div key={s.id} className="flex flex-col gap-0.5">
@@ -178,7 +192,7 @@ export function TranscriptPanel({
           )}
         </div>
       )}
-    </Section>
+    </section>
   );
 }
 

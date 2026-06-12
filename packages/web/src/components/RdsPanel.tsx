@@ -1,4 +1,4 @@
-// RDS panel for the spectrum sidebar. Broadcast FM stations transmit a 57 kHz
+// RDS panel for the read rail beside the spectrum. Broadcast FM stations transmit a 57 kHz
 // data subcarrier (Radio Data System) carrying the station name, programme type,
 // scrolling RadioText and clock-time. The server decodes it from the WFM
 // multiplex; this panel shows the running result. It only applies in WFM mode.
