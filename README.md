@@ -10,6 +10,24 @@ spectrum/waterfall and plays demodulated audio.
 - `librtlsdr` (provides `rtl_tcp`): `brew install librtlsdr`
 - An RTL-SDR Blog V3 dongle plugged in (`rtl_test -t` should list it)
 
+Optional (features disable themselves when missing):
+
+- `rtl_433` for ISM-band sensor decode: `brew install rtl_433`
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) for live speech-to-text
+  of the tuned station: `brew install whisper-cpp`, then download a ggml model
+  into `~/.cache/whisper.cpp` (or `models/`), e.g.
+
+  ```sh
+  curl -L -o ~/.cache/whisper.cpp/ggml-small.en.bin \
+    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+  ```
+
+  Pick between downloaded models in the transcript panel (the largest is the
+  default; `WHISPER_MODEL=/path/to.bin` overrides, `WHISPER_LANG=auto` for
+  non-English stations). Dropping a Silero VAD model
+  (`ggml-silero-*.bin`) alongside it makes whisper skip music instead of
+  hallucinating lyrics over it.
+
 ## Run
 
 ```sh

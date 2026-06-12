@@ -14,6 +14,7 @@ import {
   Activity,
   AudioWaveform,
   Map as MapIcon,
+  PanelRight,
   Plane,
   RadioReceiver,
   RadioTower,
@@ -209,6 +210,44 @@ export function AudioControl({
         {Math.round(volume * 100)}%
       </span>
     </div>
+  );
+}
+
+/**
+ * Toolbar toggle for the right decode rail (RDS + transcript). When the rail
+ * is hidden while transcription is still running, a dot marks that whisper
+ * keeps working out of sight.
+ */
+export function RailToggle({
+  open,
+  transcribing,
+  onToggle,
+}: {
+  open: boolean;
+  transcribing: boolean;
+  onToggle: () => void;
+}) {
+  const label = open ? "Hide decode panel" : "Show decode panel";
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label={label}
+          aria-pressed={open}
+          className={`relative inline-flex transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none ${
+            open ? "text-foreground/80" : "text-muted-foreground"
+          }`}
+        >
+          <PanelRight className="size-3.5" />
+          {!open && transcribing && (
+            <span className="absolute -right-0.5 -top-0.5 size-1.5 rounded-full bg-primary" />
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }
 

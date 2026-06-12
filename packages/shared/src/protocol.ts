@@ -253,7 +253,11 @@ export type ClientMessage =
   /** Toggle ISM (rtl_433-style) OOK decode at the current ISM frequency. */
   | { type: "setIsm"; on: boolean }
   /** Set the ISM centre frequency in Hz (315 / 434 / 868 / 915 MHz, …). */
-  | { type: "setIsmFreq"; hz: number };
+  | { type: "setIsmFreq"; hz: number }
+  /** Toggle live speech-to-text of the demodulated audio (via whisper.cpp). */
+  | { type: "setTranscribe"; on: boolean }
+  /** Pick the whisper model by name (must be one of state.transcribeModels). */
+  | { type: "setTranscribeModel"; model: string };
 
 // ---------------------------------------------------------------------------
 // Server -> Client (JSON status)
@@ -372,6 +376,47 @@ export interface IsmEvent {
   snrDb: number;
 }
 
+/**
+ * Lifecycle of the transcription engine. `loading` while the whisper child
+ * loads its model (seconds); `lagging` when inference can't keep up with live
+ * audio and old chunks are being dropped; `failed` when the child couldn't
+ * start (or died repeatedly) — the panel surfaces each so a silent transcript
+ * is explainable.
+ */
+export const TRANSCRIBE_STATUSES = [
+  "off",
+  "loading",
+  "ready",
+  "lagging",
+  "failed",
+] as const;
+export type TranscribeStatus = (typeof TRANSCRIBE_STATUSES)[number];
+
+/**
+ * One transcribed chunk of demodulated audio (speech-to-text via whisper.cpp).
+ *
+ * While an utterance is still being spoken the server emits it as a live
+ * preview (`final: false`) that is re-issued with the same `id` and longer
+ * text every couple of seconds; once the utterance completes, a `final: true`
+ * segment with the same `id` replaces it. A final segment with empty `text`
+ * is a tombstone: the preview turned out to be nothing usable (silence,
+ * music, low confidence) and the client should remove that id.
+ */
+export interface TranscriptSegment {
+  /** Monotonic id so clients can merge batches idempotently. */
+  id: number;
+  /** Server epoch milliseconds when the audio chunk ended. */
+  time: number;
+  /** Transcribed text (trimmed; empty only on a final tombstone). */
+  text: string;
+  /** Tuned frequency (Hz) the audio was received on. */
+  freqHz: number;
+  /** Length of the transcribed audio, in seconds. */
+  durationS: number;
+  /** False while this is a live, still-refining preview of an open utterance. */
+  final: boolean;
+}
+
 /** A broadcast-FM clock-time (RDS group 4A). */
 export interface RdsClockTime {
   /** Local time the station broadcast, ISO 8601 with offset (e.g. "2026-06-09T14:30-05:00"). */
@@ -470,6 +515,17 @@ export interface RadioState {
   /** Whether the rtl_433 binary is installed on the server. The client disables
    *  the ISM tab when false, since there is no built-in fallback decoder. */
   ismAvailable: boolean;
+  /** Live speech-to-text of the demodulated audio (via whisper.cpp). */
+  transcribe: boolean;
+  /** Whether whisper.cpp and a ggml model were found on the server. The client
+   *  disables the transcription toggle when false — there is no fallback. */
+  transcribeAvailable: boolean;
+  /** Name of the whisper model in use (e.g. "small.en"), null when unavailable. */
+  transcribeModel: string | null;
+  /** All whisper models found on the server, largest first. */
+  transcribeModels: string[];
+  /** Transcription engine lifecycle, for the panel's status indicator. */
+  transcribeStatus: TranscribeStatus;
 }
 
 export type ServerMessage =
@@ -522,6 +578,12 @@ export type ServerMessage =
    * quality. Sent ~1×/s and reset on every retune or mode change.
    */
   | { type: "rds"; station: RdsStation | null; stats: RdsStats }
+  /**
+   * Transcribed speech segments (only while transcription is on). Sent
+   * incrementally as audio chunks complete; the recent history is also sent
+   * once on connect. Clients merge by `id`.
+   */
+  | { type: "transcript"; segments: TranscriptSegment[] }
   /** Scanner status, or null when scanning stops. */
   | { type: "scan"; status: ScanStatus | null }
   | { type: "error"; message: string };
@@ -661,4 +723,9 @@ export const DEFAULT_STATE: RadioState = {
   ism: false,
   ismFreqHz: ISM_FREQ_HZ,
   ismAvailable: false,
+  transcribe: false,
+  transcribeAvailable: false,
+  transcribeModel: null,
+  transcribeModels: [],
+  transcribeStatus: "off",
 };

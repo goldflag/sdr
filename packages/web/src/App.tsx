@@ -23,11 +23,13 @@ import { Section } from "@/components/Controls";
 import { IsmPanel } from "@/components/IsmPanel";
 import { IsmConsole } from "@/components/IsmConsole";
 import { RdsPanel } from "@/components/RdsPanel";
+import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { SpectrumDisplay } from "@/components/SpectrumDisplay";
 import {
   AudioControl,
   LAYER_LABEL,
   LayerToggle,
+  RailToggle,
   StatusBar,
   ViewTabs,
 } from "@/components/AppChrome";
@@ -42,7 +44,7 @@ export default function App() {
   const radio = useRadio();
   const audio = useAudioPlayer(radio.subscribeAudio);
   const ui = useUi();
-  const { view, layers, selected, receiverRef, display } = ui;
+  const { view, layers, selected, receiverRef, display, railOpen } = ui;
   const bm = useBookmarks();
 
   const state = radio.state ?? DEFAULT_STATE;
@@ -213,11 +215,6 @@ export default function App() {
                 signal={radio.signal}
                 send={radio.send}
               />
-              <RdsPanel
-                station={radio.rdsStation}
-                stats={radio.rdsStats}
-                mode={state.mode}
-              />
               <SpectrumDisplay display={display} onChange={ui.setDisplay} />
             </>
           )}
@@ -257,14 +254,21 @@ export default function App() {
               </span>
             )}
             {view === "spectrum" && (
-              <AudioControl
-                running={audio.running}
-                volume={audio.volume}
-                muted={audio.muted}
-                onVolume={audio.changeVolume}
-                onToggleMute={audio.toggleMute}
-                onEnable={audio.enable}
-              />
+              <>
+                <AudioControl
+                  running={audio.running}
+                  volume={audio.volume}
+                  muted={audio.muted}
+                  onVolume={audio.changeVolume}
+                  onToggleMute={audio.toggleMute}
+                  onEnable={audio.enable}
+                />
+                <RailToggle
+                  open={railOpen}
+                  transcribing={state.transcribe}
+                  onToggle={ui.toggleRail}
+                />
+              </>
             )}
           </div>
           {view === "spectrum" ? (
@@ -328,6 +332,27 @@ export default function App() {
             </div>
           )}
         </main>
+
+        {/* Read rail — decoded output (RDS, transcript), kept apart from the
+            control rail so live data never scrolls away behind settings. */}
+        {view === "spectrum" && railOpen && (
+          <aside className="flex w-[300px] shrink-0 flex-col border-l bg-sidebar">
+            <RdsPanel
+              station={radio.rdsStation}
+              stats={radio.rdsStats}
+              mode={state.mode}
+            />
+            <TranscriptPanel
+              segments={radio.transcripts}
+              on={state.transcribe}
+              available={state.transcribeAvailable}
+              model={state.transcribeModel}
+              models={state.transcribeModels}
+              status={state.transcribeStatus}
+              send={radio.send}
+            />
+          </aside>
+        )}
       </div>
 
       <StatusBar

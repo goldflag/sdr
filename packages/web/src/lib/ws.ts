@@ -16,6 +16,7 @@ import {
   type ScanStatus,
   type ServerMessage,
   type StationReport,
+  type TranscriptSegment,
   type VesselReport,
   BinaryFrameType,
   PROTOCOL_VERSION,
@@ -50,6 +51,7 @@ export interface IsmStats {
 }
 
 const ISM_LOG_MAX = 200;
+const TRANSCRIPT_LOG_MAX = 200;
 
 /** Merge a fresh ISM event batch into the running log, keyed by stable id. */
 function mergeIsm(prev: IsmEvent[], batch: IsmEvent[]): IsmEvent[] {
@@ -57,6 +59,24 @@ function mergeIsm(prev: IsmEvent[], batch: IsmEvent[]): IsmEvent[] {
   const byId = new Map(prev.map((e) => [e.id, e]));
   for (const e of batch) byId.set(e.id, e);
   return [...byId.values()].sort((a, b) => b.id - a.id).slice(0, ISM_LOG_MAX);
+}
+
+/** Merge transcript segments by id, oldest first (the panel reads downward).
+ *  Live previews re-arrive under the same id with longer text; an empty-text
+ *  final is a tombstone (the preview turned out to be nothing) — remove it. */
+function mergeTranscripts(
+  prev: TranscriptSegment[],
+  batch: TranscriptSegment[],
+): TranscriptSegment[] {
+  if (batch.length === 0) return prev;
+  const byId = new Map(prev.map((s) => [s.id, s]));
+  for (const s of batch) {
+    if (s.final && s.text === "") byId.delete(s.id);
+    else byId.set(s.id, s);
+  }
+  return [...byId.values()]
+    .sort((a, b) => a.id - b.id)
+    .slice(-TRANSCRIPT_LOG_MAX);
 }
 
 export function useRadio() {
@@ -76,6 +96,7 @@ export function useRadio() {
   const [ismStats, setIsmStats] = useState<IsmStats | null>(null);
   const [rdsStation, setRdsStation] = useState<RdsStation | null>(null);
   const [rdsStats, setRdsStats] = useState<RdsStats | null>(null);
+  const [transcripts, setTranscripts] = useState<TranscriptSegment[]>([]);
   const [scan, setScan] = useState<ScanStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -195,6 +216,9 @@ export function useRadio() {
           setRdsStation(msg.station);
           setRdsStats(msg.stats);
           break;
+        case "transcript":
+          setTranscripts((prev) => mergeTranscripts(prev, msg.segments));
+          break;
         case "scan":
           setScan(msg.status);
           break;
@@ -252,6 +276,7 @@ export function useRadio() {
     ismStats,
     rdsStation,
     rdsStats,
+    transcripts,
     scan,
     error,
     send,

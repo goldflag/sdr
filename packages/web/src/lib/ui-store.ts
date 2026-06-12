@@ -26,8 +26,11 @@ interface UiStore {
   selected: string | null;
   receiverRef: ReceiverRef | null;
   display: DisplaySettings;
+  /** Whether the right decode rail (RDS + transcript) is shown in the spectrum view. */
+  railOpen: boolean;
   /** Switch view; clears the map selection. */
   setView(view: View): void;
+  toggleRail(): void;
   setSelected(selected: string | null): void;
   /** Flip one layer, persist, and return the new layer set for server sync. */
   toggleLayer(layer: MapLayer): Layers;
@@ -80,6 +83,24 @@ function saveLayers(l: Layers) {
   }
 }
 
+const RAIL_KEY = "sdr.rail.open";
+
+function loadRailOpen(): boolean {
+  try {
+    return localStorage.getItem(RAIL_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function saveRailOpen(open: boolean) {
+  try {
+    localStorage.setItem(RAIL_KEY, String(open));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 const DISPLAY_KEY = "sdr.display";
 
 function loadDisplay(): DisplaySettings {
@@ -107,7 +128,14 @@ export const useUi = create<UiStore>((set, get) => ({
   receiverRef: loadRef(),
   display: loadDisplay(),
 
+  railOpen: loadRailOpen(),
+
   setView: (view) => set({ view, selected: null }),
+  toggleRail: () => {
+    const railOpen = !get().railOpen;
+    saveRailOpen(railOpen);
+    set({ railOpen });
+  },
   setSelected: (selected) => set({ selected }),
   toggleLayer: (layer) => {
     const layers = { ...get().layers, [layer]: !get().layers[layer] };

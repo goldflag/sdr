@@ -116,6 +116,11 @@ export const ClientMessageSchema = z.discriminatedUnion("type", [
   onMsg("setAis"),
   onMsg("setAprs"),
   onMsg("setIsm"),
+  onMsg("setTranscribe"),
+  z.object({
+    type: z.literal("setTranscribeModel"),
+    model: z.string().max(200),
+  }),
 ]) satisfies z.ZodType<ClientMessage>;
 
 /** Validate a parsed-JSON value as a ClientMessage; null if malformed. */

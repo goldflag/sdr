@@ -29,6 +29,7 @@ import { Nco } from "./dsp/nco";
 import { floatToInt16 } from "./dsp/resample";
 import { MapLayerScheduler } from "./layers";
 import { Scanner } from "./scanner";
+import { Transcriber } from "./transcribe";
 
 const FFT_INTERVAL_MS = 50; // ~20 fps
 const FFT_SIZE = 2048;
@@ -54,6 +55,13 @@ export class Radio {
   private spectrum = new SpectrumAnalyzer(FFT_SIZE);
   private demod = new Demodulator();
   private ism = new IsmReceiver();
+  private transcriber = new Transcriber({
+    emit: (segments) => this.sinks.json({ type: "transcript", segments }),
+    status: (status) => {
+      this.state.transcribeStatus = status;
+      this.broadcastState();
+    },
+  });
   private layers: MapLayerScheduler;
   private scanner = new Scanner({
     tune: (e) => this.scanTune(e),
@@ -81,6 +89,10 @@ export class Radio {
     // ISM decode is delegated to rtl_433; advertise whether it's installed so
     // the client can disable the ISM tab when it isn't.
     this.state.ismAvailable = IsmReceiver.available();
+    // Likewise transcription is delegated to whisper.cpp — the toggle is only
+    // offered when the whisper-server binary and a ggml model are both found.
+    this.state.transcribeAvailable = Transcriber.available();
+    this.refreshTranscribeModels();
     this.conn = new RtlTcpConnection({
       onUp: (h) => {
         this.deviceInfo = {
@@ -128,12 +140,20 @@ export class Radio {
     return this.deviceInfo;
   }
 
+  getTranscripts() {
+    return this.transcriber.snapshot();
+  }
+
   async start() {
+    // Re-arm transcription after a stop (the whisper child is killed when the
+    // last client leaves so an idle server isn't holding a loaded model).
+    if (this.state.transcribe) this.transcriber.start();
     await this.conn.start();
   }
 
   stop() {
     this.conn.stop();
+    this.transcriber.stop();
     this.state.running = false;
     this.deviceInfo = null;
     this.broadcastState();
@@ -253,6 +273,19 @@ export class Radio {
         if (msg.on) this.enterIsm();
         else this.exitIsm();
         break;
+      case "setTranscribe":
+        // Models may have been added/removed since startup — rescan on enable.
+        if (msg.on) this.refreshTranscribeModels();
+        this.state.transcribe = msg.on && this.state.transcribeAvailable;
+        if (this.state.transcribe) this.transcriber.start();
+        else this.transcriber.stop();
+        break;
+      case "setTranscribeModel":
+        if (this.state.transcribeModels.includes(msg.model)) {
+          this.state.transcribeModel = msg.model;
+          this.transcriber.setModel(msg.model);
+        }
+        break;
       case "setIsmFreq":
         this.state.ismFreqHz = msg.hz;
         if (this.state.ism) {
@@ -304,6 +337,15 @@ export class Radio {
     s.gainDb = this.preDecode.gainDb;
     s.directSampling = this.preDecode.directSampling;
     this.preDecode = null;
+  }
+
+  /** Rescan the model directories, keeping the user's pick when still valid. */
+  private refreshTranscribeModels() {
+    const models = Transcriber.listModels();
+    this.state.transcribeModels = models.map((m) => m.name);
+    if (!models.some((m) => m.name === this.state.transcribeModel)) {
+      this.state.transcribeModel = models[0]?.name ?? null;
+    }
   }
 
   /** Tune to max gain (digital decode modes are reception-limited). */
@@ -482,6 +524,12 @@ export class Radio {
     const open = squelchOpen && (!this.scanner.active || this.scanHolding);
     if (audio.length > 0 && open) {
       this.sinks.binary(encodeAudioFrame(AUDIO_RATE, floatToInt16(audio)));
+      // Speech-to-text hears exactly what the user hears (squelch-gated, post
+      // NR/AGC). The tuned frequency tags each transcript segment, and a change
+      // in it tells the transcriber to finish the previous station's chunk.
+      if (this.state.transcribe) {
+        this.transcriber.feed(audio, this.state.centerHz + this.state.vfoOffset);
+      }
     }
     if (now - this.lastSignal >= 100) {
       this.lastSignal = now;
