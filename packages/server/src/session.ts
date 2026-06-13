@@ -53,7 +53,7 @@ const MANUAL_TUNE = new Set<ClientMessage["type"]>([
 
 export class Radio {
   private conn: RtlTcpConnection;
-  private spectrum = new SpectrumAnalyzer(FFT_SIZE);
+  private spectrum = new SpectrumAnalyzer(FFT_SIZE, DEFAULT_STATE.spectrumAvg);
   private demod = new Demodulator();
   private ism = new IsmReceiver();
   private transcriber = new Transcriber({
@@ -245,6 +245,10 @@ export class Radio {
         break;
       case "setToneSquelch":
         this.state.toneSquelch = msg.tone;
+        break;
+      case "setSpectrumAvg":
+        this.state.spectrumAvg = Math.min(1, Math.max(0, msg.level));
+        this.spectrum.setAvg(this.state.spectrumAvg);
         break;
       case "setPpm":
         this.state.ppm = msg.ppm;

@@ -247,6 +247,8 @@ export type ClientMessage =
   | { type: "setSquelch"; db: number | null }
   /** Require a CTCSS tone / DCS code to open the squelch (NFM); null disables. */
   | { type: "setToneSquelch"; tone: ToneSquelch | null }
+  /** Spectrum cross-frame averaging strength, 0 (off) .. 1 (very slow). */
+  | { type: "setSpectrumAvg"; level: number }
   | { type: "setPpm"; ppm: number }
   | { type: "setBiasTee"; on: boolean }
   | { type: "setDirectSampling"; value: DirectSampling }
@@ -499,6 +501,8 @@ export interface RadioState {
   squelchDb: number | null;
   /** Required sub-audible tone (CTCSS/DCS) for the squelch to open (NFM only). */
   toneSquelch: ToneSquelch | null;
+  /** Spectrum cross-frame averaging strength, 0 (off) .. 1 (very slow). */
+  spectrumAvg: number;
   ppm: number;
   biasTee: boolean;
   directSampling: DirectSampling;
@@ -726,6 +730,7 @@ export const DEFAULT_STATE: RadioState = {
   gainDb: 0,
   squelchDb: null,
   toneSquelch: null,
+  spectrumAvg: 0.2,
   ppm: 0,
   biasTee: false,
   directSampling: DIRECT_SAMPLING.OFF,

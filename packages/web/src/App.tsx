@@ -215,7 +215,12 @@ export default function App() {
                 signal={radio.signal}
                 send={radio.send}
               />
-              <SpectrumDisplay display={display} onChange={ui.setDisplay} />
+              <SpectrumDisplay
+                display={display}
+                onChange={ui.setDisplay}
+                avg={state.spectrumAvg}
+                onAvg={(level) => radio.send({ type: "setSpectrumAvg", level })}
+              />
             </>
           )}
         </aside>

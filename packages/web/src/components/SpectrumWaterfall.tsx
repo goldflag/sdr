@@ -41,6 +41,7 @@ const NOTCH_GRAB_PX = 7; // pointer distance to remove a notch
 const MIN_SPAN = 0.01; // max zoom = 100×
 const SPECTRUM_H = 168;
 const MAX_WATERFALL_ROWS = 4096;
+const FFT_FPS = 20; // server frame rate (FFT_INTERVAL_MS = 50)
 
 interface View {
   center: number; // 0..1 within the captured band
@@ -55,6 +56,27 @@ interface WaterfallRow {
 
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 
+function copyRow(f: FftFrame | WaterfallRow): WaterfallRow {
+  return {
+    centerHz: f.centerHz,
+    sampleRate: f.sampleRate,
+    bins: new Float32Array(f.bins),
+  };
+}
+
+/** Same centre/rate/bin-count, i.e. the rows' bins are directly comparable. */
+function sameGrid(
+  a: WaterfallRow | null,
+  b: FftFrame | WaterfallRow,
+): a is WaterfallRow {
+  return (
+    a != null &&
+    a.centerHz === b.centerHz &&
+    a.sampleRate === b.sampleRate &&
+    a.bins.length === b.bins.length
+  );
+}
+
 function clampView(center: number, span: number): View {
   const sp = Math.min(1, Math.max(MIN_SPAN, span));
   const c = Math.min(1 - sp / 2, Math.max(sp / 2, center));
@@ -66,6 +88,7 @@ interface Palette {
   grid: string;
   trace: string;
   traceFill: string;
+  peak: string;
   vfo: string;
   vfoFill: string;
   axis: string;
@@ -79,6 +102,7 @@ function readPalette(): Palette {
     grid: v("--screen-grid") || "oklch(1 0 0 / 7%)",
     trace: v("--trace") || "oklch(0.82 0.17 162)",
     traceFill: v("--trace-fill") || "oklch(0.82 0.17 162 / 16%)",
+    peak: v("--trace-peak") || "oklch(0.78 0.13 75 / 90%)",
     vfo: v("--vfo") || "oklch(0.74 0.16 282)",
     vfoFill: v("--vfo-fill") || "oklch(0.74 0.16 282 / 12%)",
     axis: "oklch(0.7 0 0 / 65%)",
@@ -112,22 +136,61 @@ export function SpectrumWaterfall({
   const axisRef = useRef({ centerHz: state.centerHz, sampleRate: state.sampleRate });
   const [zoom, setZoom] = useState(1);
 
+  // Peak-hold trace: per-bin max since the last retune (or toggle).
+  const peakRef = useRef<WaterfallRow | null>(null);
+  // Waterfall speed: below full rate, k frames are max-combined into one row
+  // (max, not mean, so a single short burst still paints its row).
+  const fallAccum = useRef<{ row: WaterfallRow; count: number } | null>(null);
+
   useEffect(
     () =>
       subscribeFft((f) => {
         frameRef.current = f;
-        historyRef.current.push({
-          centerHz: f.centerHz,
-          sampleRate: f.sampleRate,
-          bins: new Float32Array(f.bins),
-        });
-        if (historyRef.current.length > MAX_WATERFALL_ROWS) {
-          historyRef.current.splice(
-            0,
-            historyRef.current.length - MAX_WATERFALL_ROWS,
-          );
+        const disp = dispRef.current;
+
+        if (!disp.peakHold) {
+          peakRef.current = null;
+        } else {
+          const peak = peakRef.current;
+          if (!sameGrid(peak, f)) {
+            peakRef.current = copyRow(f);
+          } else {
+            for (let i = 0; i < f.bins.length; i++) {
+              if (f.bins[i]! > peak.bins[i]!) peak.bins[i] = f.bins[i]!;
+            }
+          }
         }
-        pendingRows.current++;
+
+        const k = Math.max(1, Math.round(FFT_FPS / disp.waterfallSpeed));
+        let row: WaterfallRow | null = null;
+        if (k <= 1) {
+          fallAccum.current = null;
+          row = copyRow(f);
+        } else {
+          const acc = fallAccum.current;
+          if (!acc || !sameGrid(acc.row, f)) {
+            fallAccum.current = { row: copyRow(f), count: 1 };
+          } else {
+            for (let i = 0; i < f.bins.length; i++) {
+              if (f.bins[i]! > acc.row.bins[i]!) acc.row.bins[i] = f.bins[i]!;
+            }
+            acc.count++;
+          }
+          if (fallAccum.current!.count >= k) {
+            row = fallAccum.current!.row;
+            fallAccum.current = null;
+          }
+        }
+        if (row) {
+          historyRef.current.push(row);
+          if (historyRef.current.length > MAX_WATERFALL_ROWS) {
+            historyRef.current.splice(
+              0,
+              historyRef.current.length - MAX_WATERFALL_ROWS,
+            );
+          }
+          pendingRows.current++;
+        }
       }),
     [subscribeFft],
   );
@@ -240,14 +303,18 @@ export function SpectrumWaterfall({
         span = Math.max(1, disp.ceilDb - disp.floorDb);
       }
 
-      // band fraction visible at pixel x -> bin value
-      const binAt = (frac: number) =>
-        sampleRowAtHz(frame, visibleHzAt(s, v, frac)) ?? min;
+      // row value across the pixel column [x, x+1)
+      const rowAt = (row: WaterfallRow | FftFrame, x: number) =>
+        sampleRowRange(
+          row,
+          visibleHzAt(s, v, x / w),
+          visibleHzAt(s, v, (x + 1) / w),
+        ) ?? min;
 
       // --- spectrum: filled trace ---
       drawFilterOverlay(sctx, w, h, s, v, p);
 
-      const traceY = (x: number) => h - ((binAt(x / w) - min) / span) * h;
+      const traceY = (x: number) => h - ((rowAt(frame, x) - min) / span) * h;
       sctx.beginPath();
       sctx.moveTo(0, traceY(0));
       for (let x = 1; x < w; x++) sctx.lineTo(x, traceY(x));
@@ -264,6 +331,19 @@ export function SpectrumWaterfall({
       sctx.lineWidth = 1.25;
       sctx.lineJoin = "round";
       sctx.stroke();
+
+      // --- peak hold: a second, thinner trace of per-bin maxima ---
+      const peak = peakRef.current;
+      if (disp.peakHold && peak) {
+        const peakY = (x: number) => h - ((rowAt(peak, x) - min) / span) * h;
+        sctx.beginPath();
+        sctx.moveTo(0, peakY(0));
+        for (let x = 1; x < w; x++) sctx.lineTo(x, peakY(x));
+        sctx.strokeStyle = p.peak;
+        sctx.lineWidth = 1;
+        sctx.lineJoin = "round";
+        sctx.stroke();
+      }
 
       drawFreqAxis(sctx, w, h, s, v, p);
       drawVfo(sctx, w, h, s, v, p);
@@ -473,13 +553,40 @@ function visibleHzAt(s: RadioState, v: View, frac: number): number {
   return s.centerHz + (bandFrac - 0.5) * s.sampleRate;
 }
 
-function sampleRowAtHz(row: WaterfallRow | FftFrame, hz: number): number | null {
-  const f = (hz - (row.centerHz - row.sampleRate / 2)) / row.sampleRate;
-  if (f < 0 || f >= 1) return null;
-  let idx = (f * row.bins.length) | 0;
-  if (idx < 0) idx = 0;
-  else if (idx >= row.bins.length) idx = row.bins.length - 1;
-  return row.bins[idx] ?? null;
+/**
+ * Sample a row over one pixel's frequency range [hzLo, hzHi). When the pixel
+ * covers several bins, return their max — nearest-neighbour sampling skipped
+ * bins, so a narrow carrier could vanish from the trace entirely. When a bin
+ * spans several pixels (zoomed in), interpolate between bin centres instead
+ * of drawing staircases.
+ */
+function sampleRowRange(
+  row: WaterfallRow | FftFrame,
+  hzLo: number,
+  hzHi: number,
+): number | null {
+  const N = row.bins.length;
+  const lowEdge = row.centerHz - row.sampleRate / 2;
+  const lo = ((hzLo - lowEdge) / row.sampleRate) * N;
+  const hi = ((hzHi - lowEdge) / row.sampleRate) * N;
+  if (hi <= 0 || lo >= N) return null;
+  const first = Math.max(0, Math.floor(lo));
+  const last = Math.min(N - 1, Math.ceil(hi) - 1);
+  if (last > first) {
+    let m = -Infinity;
+    for (let i = first; i <= last; i++) {
+      const v = row.bins[i]!;
+      if (v > m) m = v;
+    }
+    return m;
+  }
+  // One bin or less per pixel: interpolate at the pixel midpoint between the
+  // two nearest bin centres (bin i's centre sits at coordinate i + 0.5).
+  const c = Math.min(N - 1, Math.max(0, (lo + hi) / 2 - 0.5));
+  const i0 = Math.floor(c);
+  const i1 = Math.min(N - 1, i0 + 1);
+  const t = c - i0;
+  return row.bins[i0]! * (1 - t) + row.bins[i1]! * t;
 }
 
 function drawWaterfallRows(
@@ -497,16 +604,16 @@ function drawWaterfallRows(
   if (width <= 0 || height <= 0) return;
   const img = ctx.createImageData(width, height);
   const data = img.data;
-  const hzByX = new Float64Array(width);
-  for (let x = 0; x < width; x++) {
-    hzByX[x] = visibleHzAt(s, v, (x + 0.5) / width);
+  const hzEdge = new Float64Array(width + 1);
+  for (let x = 0; x <= width; x++) {
+    hzEdge[x] = visibleHzAt(s, v, x / width);
   }
 
   for (let y = 0; y < height; y++) {
     const row = rows[rows.length - 1 - newestOffset - y];
     if (!row) continue;
     for (let x = 0; x < width; x++) {
-      const val = sampleRowAtHz(row, hzByX[x]!);
+      const val = sampleRowRange(row, hzEdge[x]!, hzEdge[x + 1]!);
       if (val == null) continue;
       const li = (clamp01((val - min) / span) * 255) | 0;
       const o = (y * width + x) * 4;

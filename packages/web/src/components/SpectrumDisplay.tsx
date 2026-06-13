@@ -24,6 +24,10 @@ export interface DisplaySettings {
   autoContrast: boolean;
   floorDb: number;
   ceilDb: number;
+  /** Draw a second trace holding each bin's maximum since the last retune. */
+  peakHold: boolean;
+  /** Waterfall rows per second; below the FFT rate, frames are max-combined. */
+  waterfallSpeed: number;
 }
 
 export const DEFAULT_DISPLAY: DisplaySettings = {
@@ -31,14 +35,21 @@ export const DEFAULT_DISPLAY: DisplaySettings = {
   autoContrast: true,
   floorDb: -90,
   ceilDb: -20,
+  peakHold: false,
+  waterfallSpeed: 20,
 };
+
+const WATERFALL_SPEEDS = [20, 10, 5, 2, 1];
 
 interface Props {
   display: DisplaySettings;
   onChange: (next: DisplaySettings) => void;
+  /** Server-side spectrum averaging strength (shared by all clients). */
+  avg: number;
+  onAvg: (level: number) => void;
 }
 
-export function SpectrumDisplay({ display, onChange }: Props) {
+export function SpectrumDisplay({ display, onChange, avg, onAvg }: Props) {
   const set = (patch: Partial<DisplaySettings>) =>
     onChange({ ...display, ...patch });
 
@@ -67,6 +78,57 @@ export function SpectrumDisplay({ display, onChange }: Props) {
           className="mt-1 h-2 w-full rounded-sm"
           style={{ background: colormapGradient(display.colormap) }}
         />
+      </Field>
+
+      <Field
+        label="Averaging"
+        value={`${Math.round(avg * 100)}%`}
+        info="Smooths the spectrum and waterfall over time. Higher settings pull weak steady signals out of the noise but blur short transmissions; turn it down when scanning for brief activity."
+      >
+        <Slider
+          value={[avg]}
+          min={0}
+          max={1}
+          step={0.05}
+          onValueChange={([v]) => v != null && onAvg(v)}
+        />
+      </Field>
+
+      <div className="flex items-center justify-between">
+        <Label className="flex items-center gap-1 text-xs">
+          Peak hold
+          <InfoTip>
+            A second trace holding the strongest level seen in each bin since
+            the last retune — leave it running to catch intermittent
+            transmissions and see which channels have been active.
+          </InfoTip>
+        </Label>
+        <Switch
+          size="sm"
+          checked={display.peakHold}
+          onCheckedChange={(on) => set({ peakHold: on })}
+        />
+      </div>
+
+      <Field
+        label="Waterfall speed"
+        info="Rows per second. Slower speeds compress more time onto the screen — frames are combined by peak, so brief bursts still leave a mark."
+      >
+        <Select
+          value={String(display.waterfallSpeed)}
+          onValueChange={(v) => set({ waterfallSpeed: Number(v) })}
+        >
+          <SelectTrigger className="h-7 w-full px-2 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {WATERFALL_SPEEDS.map((n) => (
+              <SelectItem key={n} value={String(n)}>
+                {n} rows/s
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </Field>
 
       <div className="flex items-center justify-between">
