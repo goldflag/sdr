@@ -10,13 +10,20 @@
 
 import { LIMITS, MODES } from "@sdr/shared";
 import type { ClientMessage, Mode, RadioState } from "@sdr/shared";
+import { panBand } from "@/lib/tuning";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { ChevronUp, ChevronDown, Crosshair } from "lucide-react";
+import {
+  ChevronUp,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Crosshair,
+} from "lucide-react";
 
 interface Props {
   state: RadioState;
@@ -57,12 +64,24 @@ export function Vfo({ state, send }: Props) {
         <DigitReadout tuned={tuned} onBump={bump} onSetDigit={setDigit} />
 
         <div className="flex items-center gap-3 font-mono text-[11px] text-muted-foreground">
-          <span>
+          <span className="flex items-center gap-1">
             center{" "}
             <span className="text-foreground/70">
               {(state.centerHz / 1e6).toFixed(4)}
             </span>{" "}
             MHz
+            <span className="ml-0.5 flex items-center">
+              <PanBand
+                Icon={ChevronLeft}
+                label="Move the whole monitored band down (← key)"
+                onClick={() => panBand(send, state, -1)}
+              />
+              <PanBand
+                Icon={ChevronRight}
+                label="Move the whole monitored band up (→ key)"
+                onClick={() => panBand(send, state, 1)}
+              />
+            </span>
           </span>
           <span className="text-border">|</span>
           <span>
@@ -240,6 +259,33 @@ function Stepper({
     >
       <Icon className="size-3.5" strokeWidth={2.5} />
     </button>
+  );
+}
+
+// Shift the whole monitored band down/up. Mirrors the ←/→ keyboard shortcuts
+// (see lib/use-radio-keys), surfaced as buttons so the controls are discoverable.
+function PanBand({
+  Icon,
+  label,
+  onClick,
+}: {
+  Icon: typeof ChevronLeft;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          aria-label={label}
+          onClick={onClick}
+          className="flex size-5 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-primary/15 hover:text-primary"
+        >
+          <Icon className="size-3.5" strokeWidth={2.5} />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }
 

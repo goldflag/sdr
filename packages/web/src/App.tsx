@@ -7,6 +7,7 @@ import { lazy, Suspense, useEffect } from "react";
 import { DEFAULT_STATE, type MapLayer } from "@sdr/shared";
 import { useRadio } from "@/lib/ws";
 import { useAudioPlayer } from "@/lib/use-audio";
+import { useRadioKeys } from "@/lib/use-radio-keys";
 import { useUi, type Layers, type View } from "@/lib/ui-store";
 import { SpectrumWaterfall } from "@/components/SpectrumWaterfall";
 import { Controls } from "@/components/Controls";
@@ -48,6 +49,9 @@ export default function App() {
   const bm = useBookmarks();
 
   const state = radio.state ?? DEFAULT_STATE;
+
+  // Arrow-key tuning: ←/→ pan the whole band, ↑/↓ fine-tune the VFO.
+  useRadioKeys({ state, send: radio.send, enabled: view === "spectrum" });
 
   // The selected aircraft, surfaced as a floating detail card over the map.
   const selAircraft =

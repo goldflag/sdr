@@ -346,17 +346,19 @@ export function SpectrumWaterfall({
       sctx.fillStyle = p.screen;
       sctx.fillRect(0, 0, w, h);
       drawGrid(sctx, w, h, p);
-      // Band-plan allocations: faint full-height tint behind everything, with a
-      // labelled strip drawn on top once the trace is down (so labels stay crisp).
+      // Band-plan overlay: a reserved top lane (the labelled ruler) plus a faint
+      // body tint. Tuning markers are inset below the lane so they never cross
+      // the bar; the lane itself is painted last, after the trace.
       const bp = bandPlanRef.current;
-      if (bp) drawBandPlanTint(sctx, w, h, s, v, bp);
+      const top = bp ? BANDPLAN_STRIP_H : 0;
+      if (bp) drawBandPlanTint(sctx, w, h, top, s, v, bp);
 
       if (!frame) {
-        drawFilterOverlay(sctx, w, h, s, v, p);
-        if (bp) drawBandPlanStrip(sctx, w, h, s, v, bp);
+        drawFilterOverlay(sctx, w, h, top, s, v, p);
         drawFreqAxis(sctx, w, h, s, v, p);
-        drawVfo(sctx, w, h, s, v, p);
-        drawNotches(sctx, w, h, s, v);
+        drawVfo(sctx, w, h, top, s, v, p);
+        drawNotches(sctx, w, h, top, s, v);
+        if (bp) drawBandPlanStrip(sctx, w, s, v, p, bp);
         return;
       }
 
@@ -393,7 +395,7 @@ export function SpectrumWaterfall({
         ) ?? min;
 
       // --- spectrum: filled trace ---
-      drawFilterOverlay(sctx, w, h, s, v, p);
+      drawFilterOverlay(sctx, w, h, top, s, v, p);
 
       const traceY = (x: number) => h - ((rowAt(frame, x) - min) / span) * h;
       sctx.beginPath();
@@ -426,10 +428,10 @@ export function SpectrumWaterfall({
         sctx.stroke();
       }
 
-      if (bp) drawBandPlanStrip(sctx, w, h, s, v, bp);
       drawFreqAxis(sctx, w, h, s, v, p);
-      drawVfo(sctx, w, h, s, v, p);
-      drawNotches(sctx, w, h, s, v);
+      drawVfo(sctx, w, h, top, s, v, p);
+      drawNotches(sctx, w, h, top, s, v);
+      if (bp) drawBandPlanStrip(sctx, w, s, v, p, bp);
 
       // --- waterfall ---
       const fw = fall.width;
@@ -736,8 +738,8 @@ function vfoX(w: number, s: RadioState, v: View): number {
   return offsetX(w, s, v, s.vfoOffset);
 }
 
-const BANDPLAN_STRIP_H = 12; // px: height of the labelled allocation strip
-const BANDPLAN_LABEL = "oklch(0.16 0.01 277)"; // dark text on the bright strip
+const BANDPLAN_STRIP_H = 14; // px: reserved top lane for the band-plan ruler
+const BANDPLAN_BASELINE = "oklch(1 0 0 / 14%)"; // shelf line under the lane
 
 /** On-screen pixel span of a segment, clamped to the canvas; null if off-screen. */
 function segmentX(
@@ -745,71 +747,82 @@ function segmentX(
   s: RadioState,
   v: View,
   seg: BandSegment,
-): { x0: number; x1: number; rawX0: number; rawX1: number } | null {
-  const rawX0 = offsetX(w, s, v, seg.startHz - s.centerHz);
-  const rawX1 = offsetX(w, s, v, seg.endHz - s.centerHz);
-  const x0 = Math.max(0, rawX0);
-  const x1 = Math.min(w, rawX1);
+): { x0: number; x1: number } | null {
+  const x0 = Math.max(0, offsetX(w, s, v, seg.startHz - s.centerHz));
+  const x1 = Math.min(w, offsetX(w, s, v, seg.endHz - s.centerHz));
   if (x1 <= 0 || x0 >= w || x1 <= x0) return null;
-  return { x0, x1, rawX0, rawX1 };
+  return { x0, x1 };
 }
 
-/** Faint full-height wash marking each allocation; drawn behind the trace. */
+/**
+ * Faint wash colouring each allocation behind the trace, in the spectrum body
+ * below the lane — lets you read which band a signal sits in at a glance.
+ */
 function drawBandPlanTint(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
+  top: number,
   s: RadioState,
   v: View,
   segments: BandSegment[],
 ) {
   ctx.save();
-  ctx.globalAlpha = 0.07;
+  ctx.globalAlpha = 0.06;
   for (const seg of segments) {
     const px = segmentX(w, s, v, seg);
     if (!px) continue;
     ctx.fillStyle = CATEGORY_COLOR[seg.category];
-    ctx.fillRect(px.x0, 0, px.x1 - px.x0, h);
+    ctx.fillRect(px.x0, top, px.x1 - px.x0, h - top);
   }
   ctx.restore();
 }
 
-/** Coloured top strip with band names + edge ticks; drawn over the trace. */
+/**
+ * The band-plan lane: a reserved strip across the top, each allocation a muted
+ * tint of its category colour with a colour-coded label and a crisp top accent.
+ * Painted last, after the trace, while the tuning markers stop below the lane —
+ * so nothing crosses the bar or its text. Each segment wipes only its own slot,
+ * leaving gaps showing the live spectrum so signals there stay visible.
+ */
 function drawBandPlanStrip(
   ctx: CanvasRenderingContext2D,
   w: number,
-  h: number,
   s: RadioState,
   v: View,
+  p: Palette,
   segments: BandSegment[],
 ) {
   ctx.save();
   ctx.font = "9px ui-monospace, 'SF Mono', Menlo, monospace";
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
+  const midY = BANDPLAN_STRIP_H / 2 + 0.5;
   for (const seg of segments) {
     const px = segmentX(w, s, v, seg);
     if (!px) continue;
     const color = CATEGORY_COLOR[seg.category];
-
-    ctx.globalAlpha = 0.85;
-    ctx.fillStyle = color;
-    ctx.fillRect(px.x0, 0, px.x1 - px.x0, BANDPLAN_STRIP_H);
-
-    // Faint full-height ticks where a real band edge falls inside the view.
-    ctx.globalAlpha = 0.45;
-    if (px.rawX0 >= 0 && px.rawX0 <= w)
-      ctx.fillRect(Math.round(px.rawX0), 0, 1, h);
-    if (px.rawX1 >= 0 && px.rawX1 <= w)
-      ctx.fillRect(Math.round(px.rawX1) - 1, 0, 1, h);
+    const slotW = px.x1 - px.x0;
 
     ctx.globalAlpha = 1;
-    const tw = ctx.measureText(seg.name).width;
-    if (px.x1 - px.x0 > tw + 6) {
-      ctx.fillStyle = BANDPLAN_LABEL;
-      ctx.fillText(seg.name, (px.x0 + px.x1) / 2, BANDPLAN_STRIP_H / 2 + 0.5);
+    ctx.fillStyle = p.screen;
+    ctx.fillRect(px.x0, 0, slotW, BANDPLAN_STRIP_H);
+    ctx.globalAlpha = 0.2;
+    ctx.fillStyle = color;
+    ctx.fillRect(px.x0, 0, slotW, BANDPLAN_STRIP_H);
+    ctx.globalAlpha = 0.7;
+    ctx.fillRect(px.x0, 0, slotW, 1.5);
+
+    ctx.globalAlpha = 1;
+    if (slotW > ctx.measureText(seg.name).width + 6) {
+      ctx.fillStyle = color;
+      ctx.fillText(seg.name, (px.x0 + px.x1) / 2, midY);
     }
   }
+  // Shelf baseline tying the lane together and separating it from the spectrum.
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = BANDPLAN_BASELINE;
+  ctx.fillRect(0, BANDPLAN_STRIP_H, w, 1);
   ctx.restore();
 }
 
@@ -839,6 +852,7 @@ function drawFilterOverlay(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
+  top: number,
   s: RadioState,
   v: View,
   p: Palette,
@@ -846,19 +860,20 @@ function drawFilterOverlay(
   const x0 = offsetX(w, s, v, s.vfoOffset + s.filterLow);
   const x1 = offsetX(w, s, v, s.vfoOffset + s.filterHigh);
   ctx.fillStyle = p.vfoFill;
-  ctx.fillRect(x0, 0, Math.max(1, x1 - x0), h);
+  ctx.fillRect(x0, top, Math.max(1, x1 - x0), h - top);
 
   // Draggable edge handles.
   ctx.strokeStyle = p.vfo;
   ctx.lineWidth = 1;
   ctx.beginPath();
   for (const ex of [x0, x1]) {
-    ctx.moveTo(Math.round(ex) + 0.5, 0);
+    ctx.moveTo(Math.round(ex) + 0.5, top);
     ctx.lineTo(Math.round(ex) + 0.5, h);
   }
   ctx.stroke();
   ctx.fillStyle = p.vfo;
-  for (const ex of [x0, x1]) ctx.fillRect(Math.round(ex) - 1, h / 2 - 9, 3, 18);
+  for (const ex of [x0, x1])
+    ctx.fillRect(Math.round(ex) - 1, (top + h) / 2 - 9, 3, 18);
 }
 
 const NOTCH_COLOR = "oklch(0.7 0.19 25)"; // red
@@ -867,6 +882,7 @@ function drawNotches(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
+  top: number,
   s: RadioState,
   v: View,
 ) {
@@ -880,7 +896,7 @@ function drawNotches(
     const x = offsetX(w, s, v, hz - s.centerHz);
     if (x < -2 || x > w + 2) continue;
     ctx.beginPath();
-    ctx.moveTo(Math.round(x) + 0.5, 0);
+    ctx.moveTo(Math.round(x) + 0.5, top);
     ctx.lineTo(Math.round(x) + 0.5, h);
     ctx.stroke();
   }
@@ -891,7 +907,7 @@ function drawNotches(
   for (const hz of s.notches) {
     const x = offsetX(w, s, v, hz - s.centerHz);
     if (x < -2 || x > w + 2) continue;
-    ctx.fillText("⊘", Math.round(x), 2);
+    ctx.fillText("⊘", Math.round(x), top + 2);
   }
   ctx.restore();
 }
@@ -900,6 +916,7 @@ function drawVfo(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
+  top: number,
   s: RadioState,
   v: View,
   p: Palette,
@@ -909,24 +926,25 @@ function drawVfo(
   ctx.strokeStyle = p.vfo;
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(Math.round(x) + 0.5, 0);
+  ctx.moveTo(Math.round(x) + 0.5, top);
   ctx.lineTo(Math.round(x) + 0.5, h);
   ctx.stroke();
 
-  // Tuned-frequency label, kept inside the canvas bounds.
+  // Tuned-frequency label, just below the band-plan lane and inside the canvas.
   const tuned = s.centerHz + s.vfoOffset;
   const label = formatHz(tuned);
   ctx.font = "600 11px ui-monospace, 'SF Mono', Menlo, monospace";
   const tw = ctx.measureText(label).width;
   const pad = 5;
+  const ly = top + 4;
   let lx = x + 6;
   if (lx + tw + pad * 2 > w) lx = x - 6 - tw - pad * 2;
   ctx.fillStyle = p.vfo;
-  ctx.fillRect(lx, 4, tw + pad * 2, 17);
+  ctx.fillRect(lx, ly, tw + pad * 2, 17);
   ctx.fillStyle = "oklch(0.16 0.02 282)";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillText(label, lx + pad, 4 + 9);
+  ctx.fillText(label, lx + pad, ly + 9);
 }
 
 function drawFreqAxis(
