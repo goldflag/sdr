@@ -45,6 +45,15 @@ export class SpectrumAnalyzer {
     this.emaAlpha = Math.pow(0.02, l);
   }
 
+  /** Drop all buffered/accumulated state (call when the input stream jumps,
+   *  e.g. switching between the full-band and zoom pipelines). */
+  reset() {
+    this.pendingFill = 0;
+    this.accum.fill(0);
+    this.accumBlocks = 0;
+    this.ema = null;
+  }
+
   setSize(size: number) {
     if (size === this.size) return;
     this.size = size;

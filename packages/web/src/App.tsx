@@ -293,6 +293,9 @@ export default function App() {
                   onNotches={(notches) =>
                     radio.send({ type: "setNotches", notches })
                   }
+                  onSpectrumView={(view) =>
+                    radio.send({ type: "setSpectrumView", view })
+                  }
                 />
               </div>
             </>

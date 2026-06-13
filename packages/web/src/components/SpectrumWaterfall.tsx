@@ -16,15 +16,21 @@
 
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
-import type { FftFrame, RadioState } from "@sdr/shared";
+import type { FftFrame, RadioState, SpectrumView } from "@sdr/shared";
 import { formatHz } from "@/lib/utils";
 import { colormapLut } from "@/lib/colormaps";
 import type { DisplaySettings } from "@/components/SpectrumDisplay";
+import {
+  bandPlanSegments,
+  CATEGORY_COLOR,
+  type BandSegment,
+} from "@/lib/band-plans";
 import { Button } from "@/components/ui/button";
 
 interface Props {
@@ -34,6 +40,8 @@ interface Props {
   onTune: (offsetHz: number) => void;
   onPassband: (low: number, high: number) => void;
   onNotches: (notches: number[]) => void;
+  /** Tell the server which window is visible, so it can deliver a zoom-FFT. */
+  onSpectrumView: (view: SpectrumView | null) => void;
 }
 
 const EDGE_GRAB_PX = 7; // pointer distance to grab a filter edge
@@ -116,6 +124,7 @@ export function SpectrumWaterfall({
   onTune,
   onPassband,
   onNotches,
+  onSpectrumView,
 }: Props) {
   const specRef = useRef<HTMLCanvasElement>(null);
   const fallRef = useRef<HTMLCanvasElement>(null);
@@ -128,6 +137,18 @@ export function SpectrumWaterfall({
   stateRef.current = state;
   const dispRef = useRef(display);
   dispRef.current = display;
+  // Resolve the selected band plan once per change; the draw loop reads the ref.
+  const bandPlan = useMemo(
+    () => bandPlanSegments(display.bandPlan),
+    [display.bandPlan],
+  );
+  const bandPlanRef = useRef(bandPlan);
+  bandPlanRef.current = bandPlan;
+  const onViewRef = useRef(onSpectrumView);
+  onViewRef.current = onSpectrumView;
+  // Debounce view→server sends; suppress server echo while the user is dragging.
+  const viewSendTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastViewInteract = useRef(0);
   const range = useRef({ min: -90, max: -20 });
   const dpr = useRef(1);
   const pal = useRef<Palette>(readPalette());
@@ -147,6 +168,17 @@ export function SpectrumWaterfall({
       subscribeFft((f) => {
         frameRef.current = f;
         const disp = dispRef.current;
+
+        // Zoom-out (or a sample-rate change) coarsens the bins: the stored rows
+        // cover a narrower span than the new view, so they can't fill it. Drop
+        // them and restart the waterfall rather than leave a half-empty band.
+        const last = historyRef.current[historyRef.current.length - 1];
+        if (last && f.sampleRate > last.sampleRate * 1.0001) {
+          historyRef.current.length = 0;
+          fallAccum.current = null;
+          pendingRows.current = 0;
+          waterfallDirty.current = true;
+        }
 
         if (!disp.peakHold) {
           peakRef.current = null;
@@ -203,8 +235,52 @@ export function SpectrumWaterfall({
     view.current = clampView(center, span);
     waterfallDirty.current = true;
     setZoom(1 / view.current.span);
+    // Tell the server what's visible (debounced) so it can deliver a zoom-FFT.
+    lastViewInteract.current = Date.now();
+    if (viewSendTimer.current != null) clearTimeout(viewSendTimer.current);
+    viewSendTimer.current = setTimeout(() => {
+      viewSendTimer.current = null;
+      const s = stateRef.current;
+      const v = view.current;
+      onViewRef.current(
+        v.span >= 0.999
+          ? null
+          : {
+              centerHz: s.centerHz + (v.center - 0.5) * s.sampleRate,
+              spanHz: v.span * s.sampleRate,
+            },
+      );
+    }, 120);
   };
   const resetView = () => setView(0.5, 1);
+
+  // Adopt a view set elsewhere: the server resets zoom on retune (null), and
+  // another client zooming updates the shared window. Skip while this client is
+  // actively interacting (that's our own echo coming back).
+  const sv = state.spectrumView;
+  const svCenter = sv?.centerHz;
+  const svSpan = sv?.spanHz;
+  useEffect(() => {
+    if (Date.now() - lastViewInteract.current < 500) return;
+    const v = view.current;
+    if (svCenter == null || svSpan == null) {
+      if (v.span < 0.999) {
+        view.current = clampView(0.5, 1);
+        waterfallDirty.current = true;
+        setZoom(1);
+      }
+      return;
+    }
+    const center = 0.5 + (svCenter - state.centerHz) / state.sampleRate;
+    const span = svSpan / state.sampleRate;
+    if (Math.abs(center - v.center) < 0.005 && Math.abs(span - v.span) < 0.005) {
+      return; // already showing this window (our own echo)
+    }
+    view.current = clampView(center, span);
+    waterfallDirty.current = true;
+    setZoom(1 / view.current.span);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [svCenter, svSpan, state.centerHz, state.sampleRate]);
 
   // Resize canvases to their container. Spectrum is rendered at device
   // resolution for a crisp trace; the waterfall stays 1:1 (it scrolls via
@@ -270,9 +346,14 @@ export function SpectrumWaterfall({
       sctx.fillStyle = p.screen;
       sctx.fillRect(0, 0, w, h);
       drawGrid(sctx, w, h, p);
+      // Band-plan allocations: faint full-height tint behind everything, with a
+      // labelled strip drawn on top once the trace is down (so labels stay crisp).
+      const bp = bandPlanRef.current;
+      if (bp) drawBandPlanTint(sctx, w, h, s, v, bp);
 
       if (!frame) {
         drawFilterOverlay(sctx, w, h, s, v, p);
+        if (bp) drawBandPlanStrip(sctx, w, h, s, v, bp);
         drawFreqAxis(sctx, w, h, s, v, p);
         drawVfo(sctx, w, h, s, v, p);
         drawNotches(sctx, w, h, s, v);
@@ -345,6 +426,7 @@ export function SpectrumWaterfall({
         sctx.stroke();
       }
 
+      if (bp) drawBandPlanStrip(sctx, w, h, s, v, bp);
       drawFreqAxis(sctx, w, h, s, v, p);
       drawVfo(sctx, w, h, s, v, p);
       drawNotches(sctx, w, h, s, v);
@@ -609,17 +691,30 @@ function drawWaterfallRows(
     hzEdge[x] = visibleHzAt(s, v, x / width);
   }
 
+  // No-data pixels (a row that doesn't cover this frequency, or rows we don't
+  // have yet) get the colormap's floor colour. They MUST be written opaque, not
+  // skipped: the incremental scroll copies the canvas onto itself with
+  // source-over compositing, and transparent source pixels leave the
+  // destination untouched — so any gap left transparent would freeze in place
+  // instead of scrolling with the rest of the waterfall.
+  const bg0 = lut[0]!;
+  const bg1 = lut[1]!;
+  const bg2 = lut[2]!;
   for (let y = 0; y < height; y++) {
     const row = rows[rows.length - 1 - newestOffset - y];
-    if (!row) continue;
     for (let x = 0; x < width; x++) {
-      const val = sampleRowRange(row, hzEdge[x]!, hzEdge[x + 1]!);
-      if (val == null) continue;
-      const li = (clamp01((val - min) / span) * 255) | 0;
       const o = (y * width + x) * 4;
-      data[o] = lut[li * 3]!;
-      data[o + 1] = lut[li * 3 + 1]!;
-      data[o + 2] = lut[li * 3 + 2]!;
+      const val = row ? sampleRowRange(row, hzEdge[x]!, hzEdge[x + 1]!) : null;
+      if (val == null) {
+        data[o] = bg0;
+        data[o + 1] = bg1;
+        data[o + 2] = bg2;
+      } else {
+        const li = (clamp01((val - min) / span) * 255) | 0;
+        data[o] = lut[li * 3]!;
+        data[o + 1] = lut[li * 3 + 1]!;
+        data[o + 2] = lut[li * 3 + 2]!;
+      }
       data[o + 3] = 255;
     }
   }
@@ -639,6 +734,83 @@ function offsetX(w: number, s: RadioState, v: View, offFromCenterHz: number): nu
 
 function vfoX(w: number, s: RadioState, v: View): number {
   return offsetX(w, s, v, s.vfoOffset);
+}
+
+const BANDPLAN_STRIP_H = 12; // px: height of the labelled allocation strip
+const BANDPLAN_LABEL = "oklch(0.16 0.01 277)"; // dark text on the bright strip
+
+/** On-screen pixel span of a segment, clamped to the canvas; null if off-screen. */
+function segmentX(
+  w: number,
+  s: RadioState,
+  v: View,
+  seg: BandSegment,
+): { x0: number; x1: number; rawX0: number; rawX1: number } | null {
+  const rawX0 = offsetX(w, s, v, seg.startHz - s.centerHz);
+  const rawX1 = offsetX(w, s, v, seg.endHz - s.centerHz);
+  const x0 = Math.max(0, rawX0);
+  const x1 = Math.min(w, rawX1);
+  if (x1 <= 0 || x0 >= w || x1 <= x0) return null;
+  return { x0, x1, rawX0, rawX1 };
+}
+
+/** Faint full-height wash marking each allocation; drawn behind the trace. */
+function drawBandPlanTint(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  s: RadioState,
+  v: View,
+  segments: BandSegment[],
+) {
+  ctx.save();
+  ctx.globalAlpha = 0.07;
+  for (const seg of segments) {
+    const px = segmentX(w, s, v, seg);
+    if (!px) continue;
+    ctx.fillStyle = CATEGORY_COLOR[seg.category];
+    ctx.fillRect(px.x0, 0, px.x1 - px.x0, h);
+  }
+  ctx.restore();
+}
+
+/** Coloured top strip with band names + edge ticks; drawn over the trace. */
+function drawBandPlanStrip(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  s: RadioState,
+  v: View,
+  segments: BandSegment[],
+) {
+  ctx.save();
+  ctx.font = "9px ui-monospace, 'SF Mono', Menlo, monospace";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
+  for (const seg of segments) {
+    const px = segmentX(w, s, v, seg);
+    if (!px) continue;
+    const color = CATEGORY_COLOR[seg.category];
+
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = color;
+    ctx.fillRect(px.x0, 0, px.x1 - px.x0, BANDPLAN_STRIP_H);
+
+    // Faint full-height ticks where a real band edge falls inside the view.
+    ctx.globalAlpha = 0.45;
+    if (px.rawX0 >= 0 && px.rawX0 <= w)
+      ctx.fillRect(Math.round(px.rawX0), 0, 1, h);
+    if (px.rawX1 >= 0 && px.rawX1 <= w)
+      ctx.fillRect(Math.round(px.rawX1) - 1, 0, 1, h);
+
+    ctx.globalAlpha = 1;
+    const tw = ctx.measureText(seg.name).width;
+    if (px.x1 - px.x0 > tw + 6) {
+      ctx.fillStyle = BANDPLAN_LABEL;
+      ctx.fillText(seg.name, (px.x0 + px.x1) / 2, BANDPLAN_STRIP_H / 2 + 0.5);
+    }
+  }
+  ctx.restore();
 }
 
 function drawGrid(

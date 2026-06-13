@@ -121,6 +121,12 @@ export const ClientMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("setSpectrumAvg"),
     level: finite.min(0).max(1),
   }),
+  z.object({
+    type: z.literal("setSpectrumView"),
+    view: z
+      .object({ centerHz: finite, spanHz: finite.positive() })
+      .nullable(),
+  }),
   z.object({ type: z.literal("setPpm"), ppm: finite }),
   onMsg("setBiasTee"),
   z.object({ type: z.literal("setDirectSampling"), value: directSampling }),

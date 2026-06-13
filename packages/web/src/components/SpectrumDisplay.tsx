@@ -18,6 +18,12 @@ import {
   colormapGradient,
   type ColormapName,
 } from "@/lib/colormaps";
+import {
+  BAND_PLANS,
+  CATEGORY_COLOR,
+  CATEGORY_LABEL,
+  type BandCategory,
+} from "@/lib/band-plans";
 
 export interface DisplaySettings {
   colormap: ColormapName;
@@ -28,6 +34,8 @@ export interface DisplaySettings {
   peakHold: boolean;
   /** Waterfall rows per second; below the FFT rate, frames are max-combined. */
   waterfallSpeed: number;
+  /** Band-plan overlay region code (see lib/band-plans), or "off". */
+  bandPlan: string;
 }
 
 export const DEFAULT_DISPLAY: DisplaySettings = {
@@ -37,6 +45,7 @@ export const DEFAULT_DISPLAY: DisplaySettings = {
   ceilDb: -20,
   peakHold: false,
   waterfallSpeed: 20,
+  bandPlan: "US",
 };
 
 const WATERFALL_SPEEDS = [20, 10, 5, 2, 1];
@@ -78,6 +87,44 @@ export function SpectrumDisplay({ display, onChange, avg, onAvg }: Props) {
           className="mt-1 h-2 w-full rounded-sm"
           style={{ background: colormapGradient(display.colormap) }}
         />
+      </Field>
+
+      <Field
+        label="Band plan"
+        info="Overlays a region's frequency allocations on the spectrum — broadcast, amateur, air, marine, ISM and more — shaded and labelled by category. Pick a country to match your location, or turn it off."
+      >
+        <Select
+          value={display.bandPlan}
+          onValueChange={(v) => set({ bandPlan: v })}
+        >
+          <SelectTrigger className="h-7 w-full px-2 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="off">Off</SelectItem>
+            {BAND_PLANS.map((p) => (
+              <SelectItem key={p.code} value={p.code}>
+                {p.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {display.bandPlan !== "off" && (
+          <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1">
+            {(Object.keys(CATEGORY_LABEL) as BandCategory[]).map((c) => (
+              <span
+                key={c}
+                className="flex items-center gap-1 text-[10px] text-muted-foreground"
+              >
+                <span
+                  className="size-2 rounded-[2px]"
+                  style={{ background: CATEGORY_COLOR[c] }}
+                />
+                {CATEGORY_LABEL[c]}
+              </span>
+            ))}
+          </div>
+        )}
       </Field>
 
       <Field
@@ -176,7 +223,8 @@ export function SpectrumDisplay({ display, onChange, avg, onAvg }: Props) {
 
       <p className="text-[11px] text-muted-foreground">
         Scroll over the spectrum to zoom (⇧-scroll pans); drag the waterfall to
-        pan; double-click to reset.
+        pan; double-click to reset. Zooming sharpens the FFT on the server, so
+        narrow signals resolve rather than just enlarging.
       </p>
     </Section>
   );

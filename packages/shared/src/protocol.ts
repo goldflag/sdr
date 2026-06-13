@@ -49,6 +49,17 @@ export type ToneSquelch =
   | { kind: "dcs"; code: number; inverted: boolean };
 
 /**
+ * Zoomed spectrum window: the absolute frequency range the user is looking at.
+ * When set, the server delivers FFT frames covering (at least) this window at a
+ * higher resolution bandwidth — a zoom-FFT — instead of stretching the
+ * full-band frame. Shared by all clients (last write wins), like the VFO.
+ */
+export interface SpectrumView {
+  centerHz: number;
+  spanHz: number;
+}
+
+/**
  * Default channel filter edges (Hz, relative to the tuned VFO) for a mode at a
  * given bandwidth. SSB is single-sided; CW sits around the CW beat tone; AM/FM
  * are symmetric. Edges can then be dragged independently (passband tuning).
@@ -249,6 +260,8 @@ export type ClientMessage =
   | { type: "setToneSquelch"; tone: ToneSquelch | null }
   /** Spectrum cross-frame averaging strength, 0 (off) .. 1 (very slow). */
   | { type: "setSpectrumAvg"; level: number }
+  /** Zoom the spectrum to a frequency window (higher resolution); null = full band. */
+  | { type: "setSpectrumView"; view: SpectrumView | null }
   | { type: "setPpm"; ppm: number }
   | { type: "setBiasTee"; on: boolean }
   | { type: "setDirectSampling"; value: DirectSampling }
@@ -503,6 +516,8 @@ export interface RadioState {
   toneSquelch: ToneSquelch | null;
   /** Spectrum cross-frame averaging strength, 0 (off) .. 1 (very slow). */
   spectrumAvg: number;
+  /** Active zoom-FFT window, or null when showing the full captured band. */
+  spectrumView: SpectrumView | null;
   ppm: number;
   biasTee: boolean;
   directSampling: DirectSampling;
@@ -731,6 +746,7 @@ export const DEFAULT_STATE: RadioState = {
   squelchDb: null,
   toneSquelch: null,
   spectrumAvg: 0.2,
+  spectrumView: null,
   ppm: 0,
   biasTee: false,
   directSampling: DIRECT_SAMPLING.OFF,

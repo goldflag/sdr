@@ -23,6 +23,7 @@ import {
 } from "@sdr/shared";
 import { RtlTcpConnection } from "./rtltcp/connection";
 import { SpectrumAnalyzer } from "./dsp/fft";
+import { ZoomSpectrum } from "./dsp/zoom";
 import { Demodulator } from "./dsp/demod";
 import { IsmReceiver } from "./dsp/ism";
 import { Nco } from "./dsp/nco";
@@ -54,6 +55,7 @@ const MANUAL_TUNE = new Set<ClientMessage["type"]>([
 export class Radio {
   private conn: RtlTcpConnection;
   private spectrum = new SpectrumAnalyzer(FFT_SIZE, DEFAULT_STATE.spectrumAvg);
+  private zoom = new ZoomSpectrum();
   private demod = new Demodulator();
   private ism = new IsmReceiver();
   private transcriber = new Transcriber({
@@ -181,12 +183,14 @@ export class Radio {
         this.demod.resetRds(); // different station — drop the old RDS data
         this.demod.resetTone();
         this.squelch.reset(); // ...and its power estimate
+        this.resetZoom(); // the band moved — drop any zoom window
         break;
       case "setSampleRate":
         this.state.sampleRate = msg.hz;
         this.client?.setSampleRate(msg.hz);
         this.vfo.setSampleRate(msg.hz);
         this.reconfigureDemod();
+        this.resetZoom(); // captured width changed — zoom window no longer valid
         break;
       case "setMode": {
         this.state.mode = msg.mode;
@@ -249,6 +253,11 @@ export class Radio {
       case "setSpectrumAvg":
         this.state.spectrumAvg = Math.min(1, Math.max(0, msg.level));
         this.spectrum.setAvg(this.state.spectrumAvg);
+        this.zoom.setAvg(this.state.spectrumAvg);
+        break;
+      case "setSpectrumView":
+        this.state.spectrumView = msg.view;
+        this.configureZoom();
         break;
       case "setPpm":
         this.state.ppm = msg.ppm;
@@ -409,6 +418,7 @@ export class Radio {
     this.vfo.setFreq(-s.vfoOffset);
     this.reconfigureDemod();
     this.squelch.reset();
+    this.resetZoom();
     if (!c) return;
     c.setSampleRate(s.sampleRate);
     c.setDirectSampling(s.directSampling);
@@ -486,6 +496,7 @@ export class Radio {
     s.filterHigh = hi;
     this.reconfigureDemod();
     this.squelch.reset();
+    this.resetZoom();
     this.broadcastState();
   }
 
@@ -513,15 +524,25 @@ export class Radio {
       return;
     }
 
-    // Spectrum sees the whole captured band (unshifted).
-    this.spectrum.push(iq);
+    // Spectrum: when zoomed, the zoom pipeline shifts+decimates a sub-window for
+    // a higher-resolution FFT; otherwise the analyzer sees the whole captured
+    // band (unshifted). Each frame carries its own centre/rate, so the client
+    // composites zoomed and full-band rows on one axis.
+    const zoomOn = this.zoom.isActive;
+    if (zoomOn) this.zoom.push(iq);
+    else this.spectrum.push(iq);
     const now = Date.now();
     if (now - this.lastFft >= FFT_INTERVAL_MS) {
-      const bins = this.spectrum.getFrame();
+      const frame = zoomOn ? this.zoom.getFrame() : null;
+      const bins = zoomOn ? frame?.bins : this.spectrum.getFrame();
       if (bins) {
         this.lastFft = now;
         this.sinks.binary(
-          encodeFftFrame(this.state.centerHz, this.state.sampleRate, bins),
+          encodeFftFrame(
+            zoomOn ? frame!.centerHz : this.state.centerHz,
+            zoomOn ? frame!.sampleRate : this.state.sampleRate,
+            bins,
+          ),
         );
       }
     }
@@ -577,6 +598,26 @@ export class Radio {
         stats: this.demod.rdsStats(),
       });
     }
+  }
+
+  /** (Re)point the zoom-FFT pipeline at the current view; resets the full-band
+   *  analyzer so the next frame after a switch is clean. */
+  private configureZoom() {
+    this.zoom.configure(
+      this.state.sampleRate,
+      this.state.centerHz,
+      this.state.spectrumView,
+      this.state.spectrumAvg,
+    );
+    this.spectrum.reset();
+  }
+
+  /** Drop any zoom window (the band moved) and return to full-band frames. */
+  private resetZoom() {
+    if (this.state.spectrumView === null && !this.zoom.isActive) return;
+    this.state.spectrumView = null;
+    this.zoom.reset();
+    this.spectrum.reset();
   }
 
   /** Tone-squelch verdict: open unless an NFM CTCSS/DCS requirement is unmet. */
