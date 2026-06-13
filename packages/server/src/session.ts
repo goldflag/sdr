@@ -184,6 +184,9 @@ export class Radio {
         this.demod.resetTone();
         this.squelch.reset(); // ...and its power estimate
         this.resetZoom(); // the band moved — drop any zoom window
+        // The bins now cover different frequencies; drop the cross-frame average
+        // so the new band snaps in instead of morphing out of the old one.
+        this.spectrum.reset();
         break;
       case "setSampleRate":
         this.state.sampleRate = msg.hz;
@@ -191,6 +194,7 @@ export class Radio {
         this.vfo.setSampleRate(msg.hz);
         this.reconfigureDemod();
         this.resetZoom(); // captured width changed — zoom window no longer valid
+        this.spectrum.reset(); // averaged bins now span a different width
         break;
       case "setMode": {
         this.state.mode = msg.mode;

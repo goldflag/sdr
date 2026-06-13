@@ -49,11 +49,22 @@ export function panBand(
   send: (msg: ClientMessage) => void,
   state: RadioState,
   dir: number,
-  factor = 0.1,
+  factor = 0.02,
 ): void {
-  const step = state.sampleRate * factor;
-  const next = clampHz(state.centerHz + Math.sign(dir) * step);
+  const next = pannedCenter(state.centerHz, state.sampleRate, dir, factor);
   if (next !== state.centerHz) send({ type: "setFrequency", hz: next });
+}
+
+/** Center frequency after shifting the band `factor` of its width from `baseHz`
+ *  (`dir < 0` down, `dir > 0` up), clamped to the tunable range. Pure helper so
+ *  the keyboard handler can accumulate a target across held keys. */
+export function pannedCenter(
+  baseHz: number,
+  sampleRateHz: number,
+  dir: number,
+  factor: number,
+): number {
+  return clampHz(baseHz + Math.sign(dir) * sampleRateHz * factor);
 }
 
 /**

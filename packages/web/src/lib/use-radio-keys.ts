@@ -6,15 +6,24 @@
 //     defer to them via e.defaultPrevented rather than double-acting.
 //
 // Bindings:
-//   ←/→        nudge the whole monitored band a tenth of a span down/up (center
-//              frequency moves with it — the band and VFO slide together)
-//   ⇧ + ←/→    move it half a span (a bigger hop)
+//   ←/→        nudge the whole monitored band a fiftieth of a span down/up
+//              (center frequency moves with it — the band and VFO slide together)
+//   ⇧ + ←/→    move it a tenth of a span (a bigger hop)
 //   ↑/↓        fine-tune the VFO a half-channel down/up within the band
 //   ⇧ + ↑/↓    a larger step
+//
+// ←/→ retune the dongle, which needs a few ms to settle. Key auto-repeat fires
+// ~30×/s, so we coalesce held repeats and retune at RETUNE_INTERVAL_MS instead —
+// otherwise the tuner never settles and the band looks stuck while the displayed
+// frequency races ahead. The target center is accumulated locally so holding a
+// key keeps panning smoothly without waiting for each server round-trip.
 
 import { useEffect, useRef } from "react";
 import type { ClientMessage, RadioState } from "@sdr/shared";
-import { panBand, nudgeTuned } from "@/lib/tuning";
+import { nudgeTuned, pannedCenter } from "@/lib/tuning";
+
+const RETUNE_INTERVAL_MS = 90; // ≤ ~11 retunes/s — a rate the tuner keeps up with
+const IDLE_RESYNC_MS = 300; // after this quiet, trust the server's center again
 
 function isTypingTarget(t: EventTarget | null): boolean {
   if (!(t instanceof HTMLElement)) return false;
@@ -37,26 +46,58 @@ export function useRadioKeys({ state, send, enabled }: Options) {
   // The listener is bound once per enable; a ref keeps it reading live state.
   const ref = useRef({ state, send });
   ref.current = { state, send };
+  // Pending dongle center, accumulated across held keys; null when idle.
+  const targetHz = useRef<number | null>(null);
+  const lastKey = useRef(0);
+  const lastSent = useRef(0);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
+
+    const flush = () => {
+      timer.current = null;
+      if (targetHz.current == null) return;
+      ref.current.send({ type: "setFrequency", hz: targetHz.current });
+      lastSent.current = Date.now();
+    };
+
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
       if (isTypingTarget(e.target)) return;
       const { state, send } = ref.current;
       switch (e.key) {
         case "ArrowLeft":
-        case "ArrowRight":
+        case "ArrowRight": {
           e.preventDefault();
-          panBand(
-            send,
-            state,
+          const now = Date.now();
+          // Build on the live target mid-gesture; after a pause, re-seed from the
+          // server's current center so we never drift from where the radio is.
+          const base =
+            targetHz.current != null && now - lastKey.current < IDLE_RESYNC_MS
+              ? targetHz.current
+              : state.centerHz;
+          lastKey.current = now;
+          targetHz.current = pannedCenter(
+            base,
+            state.sampleRate,
             e.key === "ArrowRight" ? 1 : -1,
-            e.shiftKey ? 0.5 : 0.1,
+            e.shiftKey ? 0.1 : 0.02,
           );
+          // Leading + throttled-trailing: first press fires immediately, held
+          // repeats coalesce into one retune per RETUNE_INTERVAL_MS.
+          if (timer.current == null) {
+            timer.current = setTimeout(
+              flush,
+              Math.max(0, RETUNE_INTERVAL_MS - (now - lastSent.current)),
+            );
+          }
           break;
+        }
         case "ArrowUp":
         case "ArrowDown": {
+          // VFO offset only shifts the NCO (no hardware settling), so this can
+          // fire per key without the retune throttle ←/→ needs.
           e.preventDefault();
           const fine = Math.max(500, Math.round(state.bandwidth / 2));
           const step = e.shiftKey ? fine * 10 : fine;
@@ -65,7 +106,13 @@ export function useRadioKeys({ state, send, enabled }: Options) {
         }
       }
     };
+
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (timer.current != null) clearTimeout(timer.current);
+      timer.current = null;
+      targetHz.current = null;
+    };
   }, [enabled]);
 }
