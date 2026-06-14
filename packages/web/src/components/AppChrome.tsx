@@ -19,6 +19,7 @@ import {
   RadioReceiver,
   RadioTower,
   Ship,
+  Square,
   Volume1,
   Volume2,
   VolumeX,
@@ -211,6 +212,67 @@ export function AudioControl({
       </span>
     </div>
   );
+}
+
+/**
+ * Toolbar control for recording the demodulated audio to a WAV file. Idle it's
+ * a small red dot; while recording it shows the elapsed time and a stop button
+ * (which downloads the file). Works whether or not playback is enabled.
+ */
+export function RecordControl({
+  recording,
+  seconds,
+  onStart,
+  onStop,
+}: {
+  recording: boolean;
+  seconds: number;
+  onStart: () => void;
+  onStop: () => void;
+}) {
+  if (!recording) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={onStart}
+            aria-label="Record audio to WAV"
+            className="inline-flex items-center text-muted-foreground transition-colors hover:text-destructive focus-visible:text-destructive focus-visible:outline-none motion-reduce:transition-none"
+          >
+            <span className="size-3 rounded-full bg-destructive/80" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>Record audio to WAV</TooltipContent>
+      </Tooltip>
+    );
+  }
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={onStop}
+          aria-label="Stop recording and download WAV"
+          className="inline-flex items-center gap-1.5 rounded border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 text-destructive transition-colors hover:bg-destructive/20 focus-visible:outline-none motion-reduce:transition-none"
+        >
+          <span className="size-2 animate-pulse rounded-full bg-destructive" />
+          <span className="font-mono text-[11px] tabular-nums">
+            {fmtClock(seconds)}
+          </span>
+          <Square className="size-3 fill-current" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>Stop recording &amp; download WAV</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** Seconds → "m:ss" for the recording timer. */
+function fmtClock(totalSec: number): string {
+  const s = Math.floor(totalSec);
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, "0")}`;
 }
 
 /**

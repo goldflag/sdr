@@ -7,7 +7,28 @@ import type { VesselReport } from "@sdr/shared";
 import { Ship } from "lucide-react";
 import { Section } from "@/components/Controls";
 import { RefControls } from "@/components/AdsbPanel";
+import { ExportButton } from "@/components/ExportButton";
+import { type Column, isoTime } from "@/lib/export";
 import { distanceNm } from "@/lib/geo";
+
+const AIS_COLUMNS: Column<VesselReport>[] = [
+  { header: "mmsi", value: (v) => v.mmsi },
+  { header: "name", value: (v) => v.name?.trim() },
+  { header: "callsign", value: (v) => v.callsign?.trim() },
+  { header: "ship_type", value: (v) => v.shipType },
+  { header: "lat", value: (v) => v.lat },
+  { header: "lon", value: (v) => v.lon },
+  { header: "sog_kt", value: (v) => v.sog },
+  { header: "cog_deg", value: (v) => v.cog },
+  { header: "heading_deg", value: (v) => v.heading },
+  { header: "nav_status", value: (v) => v.navStatus },
+  { header: "channel", value: (v) => v.channel },
+  { header: "class_b", value: (v) => v.classB ?? false },
+  { header: "rssi_dbfs", value: (v) => v.rssi },
+  { header: "messages", value: (v) => v.messages },
+  { header: "age_s", value: (v) => Math.round(v.seen) },
+  { header: "last_heard", value: (v) => isoTime(Date.now() - v.seen * 1000) },
+];
 
 interface Props {
   vessels: VesselReport[];
@@ -81,7 +102,14 @@ export function AisPanel(p: Props) {
       )}
 
       {withDist.length > 0 && (
-        <div className="scroll-thin overflow-x-auto">
+        <>
+          <div className="flex items-center justify-between border-b border-border/60 px-3 py-1.5">
+            <span className="text-[11px] text-muted-foreground">
+              {withDist.length} vessels
+            </span>
+            <ExportButton baseName="ais" rows={vessels} columns={AIS_COLUMNS} />
+          </div>
+          <div className="scroll-thin overflow-x-auto">
           <table className="w-full text-left font-mono text-[11px]">
             <thead className="text-muted-foreground/70">
               <tr className="border-b">
@@ -134,7 +162,8 @@ export function AisPanel(p: Props) {
               })}
             </tbody>
           </table>
-        </div>
+          </div>
+        </>
       )}
     </div>
   );

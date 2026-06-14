@@ -31,6 +31,7 @@ import {
   LAYER_LABEL,
   LayerToggle,
   RailToggle,
+  RecordControl,
   StatusBar,
   ViewTabs,
 } from "@/components/AppChrome";
@@ -271,6 +272,17 @@ export default function App() {
                   onVolume={audio.changeVolume}
                   onToggleMute={audio.toggleMute}
                   onEnable={audio.enable}
+                />
+                <RecordControl
+                  recording={audio.recording}
+                  seconds={audio.recSeconds}
+                  onStart={() =>
+                    audio.startRecording({
+                      freqHz: state.centerHz + state.vfoOffset,
+                      mode: state.mode,
+                    })
+                  }
+                  onStop={audio.stopRecording}
                 />
                 <RailToggle
                   open={railOpen}

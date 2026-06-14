@@ -14,11 +14,34 @@ import {
   Wind,
 } from "lucide-react";
 import { useState } from "react";
+import { ExportButton } from "@/components/ExportButton";
+import { type Column, isoTime } from "@/lib/export";
 
 interface Props {
   events: IsmEvent[];
   freqHz: number;
 }
+
+const ISM_COLUMNS: Column<IsmEvent>[] = [
+  { header: "time", value: (e) => isoTime(e.time) },
+  { header: "model", value: (e) => e.model },
+  { header: "protocol", value: (e) => e.protocol },
+  { header: "bits", value: (e) => e.bits },
+  { header: "code", value: (e) => e.code },
+  { header: "device_id", value: (e) => e.deviceId },
+  { header: "channel", value: (e) => e.channel },
+  { header: "data", value: (e) => e.data },
+  { header: "temp_c", value: (e) => e.tempC },
+  { header: "humidity_pct", value: (e) => e.humidityPct },
+  { header: "wind_speed_kmh", value: (e) => e.windSpeedKmh },
+  { header: "wind_dir_deg", value: (e) => e.windDirDeg },
+  { header: "rain_mm", value: (e) => e.rainMm },
+  { header: "pressure_hpa", value: (e) => e.pressureHpa },
+  { header: "pressure_kpa", value: (e) => e.pressureKpa },
+  { header: "battery_low", value: (e) => e.batteryLow },
+  { header: "repeats", value: (e) => e.repeats },
+  { header: "snr_db", value: (e) => e.snrDb },
+];
 
 function clock(ms: number): string {
   const d = new Date(ms);
@@ -56,15 +79,18 @@ export function IsmConsole({ events, freqHz }: Props) {
         <span className="tabular-nums">
           {shown.length} {showRaw ? "events" : "decoded"}
         </span>
-        <label className="flex cursor-pointer items-center gap-1.5 select-none">
-          <input
-            type="checkbox"
-            checked={showRaw}
-            onChange={(e) => setShowRaw(e.target.checked)}
-            className="size-3 accent-primary"
-          />
-          Show raw{hidden > 0 ? ` (${hidden})` : ""}
-        </label>
+        <div className="flex items-center gap-3">
+          <label className="flex cursor-pointer items-center gap-1.5 select-none">
+            <input
+              type="checkbox"
+              checked={showRaw}
+              onChange={(e) => setShowRaw(e.target.checked)}
+              className="size-3 accent-primary"
+            />
+            Show raw{hidden > 0 ? ` (${hidden})` : ""}
+          </label>
+          <ExportButton baseName="ism" rows={events} columns={ISM_COLUMNS} />
+        </div>
       </div>
 
       <div className="scroll-thin flex-1 overflow-y-auto">

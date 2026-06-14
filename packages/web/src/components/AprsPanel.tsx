@@ -6,8 +6,27 @@ import type { StationReport } from "@sdr/shared";
 import { RadioTower } from "lucide-react";
 import { Section } from "@/components/Controls";
 import { RefControls } from "@/components/AdsbPanel";
+import { ExportButton } from "@/components/ExportButton";
+import { type Column, isoTime } from "@/lib/export";
 import { aprsKind, aprsKindLabel } from "@/lib/aprs";
 import { distanceNm } from "@/lib/geo";
+
+const APRS_COLUMNS: Column<StationReport>[] = [
+  { header: "call", value: (s) => s.call },
+  { header: "kind", value: (s) => s.kind },
+  { header: "lat", value: (s) => s.lat },
+  { header: "lon", value: (s) => s.lon },
+  { header: "course_deg", value: (s) => s.course },
+  { header: "speed_kt", value: (s) => s.speed },
+  { header: "altitude_ft", value: (s) => s.altitude },
+  { header: "symbol", value: (s) => s.symbol },
+  { header: "via", value: (s) => s.via },
+  { header: "comment", value: (s) => s.comment },
+  { header: "message", value: (s) => s.message },
+  { header: "packets", value: (s) => s.packets },
+  { header: "age_s", value: (s) => Math.round(s.seen) },
+  { header: "last_heard", value: (s) => isoTime(Date.now() - s.seen * 1000) },
+];
 
 interface Props {
   stations: StationReport[];
@@ -76,7 +95,18 @@ export function AprsPanel(p: Props) {
       )}
 
       {withDist.length > 0 && (
-        <div className="scroll-thin overflow-x-auto">
+        <>
+          <div className="flex items-center justify-between border-b border-border/60 px-3 py-1.5">
+            <span className="text-[11px] text-muted-foreground">
+              {withDist.length} stations
+            </span>
+            <ExportButton
+              baseName="aprs"
+              rows={stations}
+              columns={APRS_COLUMNS}
+            />
+          </div>
+          <div className="scroll-thin overflow-x-auto">
           <table className="w-full text-left font-mono text-[11px]">
             <thead className="text-muted-foreground/70">
               <tr className="border-b">
@@ -128,7 +158,8 @@ export function AprsPanel(p: Props) {
               })}
             </tbody>
           </table>
-        </div>
+          </div>
+        </>
       )}
     </div>
   );

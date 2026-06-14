@@ -22,6 +22,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { ExportButton } from "@/components/ExportButton";
+import { type Column, isoTime } from "@/lib/export";
+
+const TRANSCRIPT_COLUMNS: Column<TranscriptSegment>[] = [
+  { header: "time", value: (s) => isoTime(s.time) },
+  { header: "freq_mhz", value: (s) => (s.freqHz / 1e6).toFixed(4) },
+  { header: "duration_s", value: (s) => s.durationS.toFixed(1) },
+  { header: "text", value: (s) => s.text },
+];
 
 interface Props {
   segments: TranscriptSegment[];
@@ -65,6 +74,8 @@ export function TranscriptPanel({
   }, [segments]);
 
   const aside = on ? STATUS_ASIDE[status] : undefined;
+  // Only completed lines with text are worth exporting (skip live previews).
+  const finals = segments.filter((s) => s.final && s.text.trim() !== "");
 
   return (
     <section className="flex min-h-0 flex-1 flex-col">
@@ -79,6 +90,13 @@ export function TranscriptPanel({
           <span className="font-mono text-[11px] text-muted-foreground">
             {aside}
           </span>
+        )}
+        {finals.length > 0 && (
+          <ExportButton
+            baseName="transcript"
+            rows={finals}
+            columns={TRANSCRIPT_COLUMNS}
+          />
         )}
       </div>
 

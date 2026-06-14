@@ -7,6 +7,8 @@ import type { AircraftReport } from "@sdr/shared";
 import { Plane, Crosshair, X } from "lucide-react";
 import { Section } from "@/components/Controls";
 import { Button } from "@/components/ui/button";
+import { ExportButton } from "@/components/ExportButton";
+import { type Column, isoTime } from "@/lib/export";
 import { icaoInfo, categoryInfo, iso2ToFlag } from "@/lib/icao";
 import { useAircraftDb } from "@/lib/aircraft-db";
 import { distanceNm } from "@/lib/geo";
@@ -22,6 +24,22 @@ interface Props {
   /** Hide the receiver-location section (when shown once by a parent). */
   hideRef?: boolean;
 }
+
+const ADSB_COLUMNS: Column<AircraftReport>[] = [
+  { header: "icao", value: (a) => a.icao },
+  { header: "callsign", value: (a) => a.callsign?.trim() },
+  { header: "category", value: (a) => a.category },
+  { header: "altitude_ft", value: (a) => a.altitude },
+  { header: "lat", value: (a) => a.lat },
+  { header: "lon", value: (a) => a.lon },
+  { header: "speed_kt", value: (a) => a.speed },
+  { header: "heading_deg", value: (a) => a.heading },
+  { header: "vert_rate_fpm", value: (a) => a.vertRate },
+  { header: "rssi_dbfs", value: (a) => a.rssi },
+  { header: "messages", value: (a) => a.messages },
+  { header: "age_s", value: (a) => Math.round(a.seen) },
+  { header: "last_heard", value: (a) => isoTime(Date.now() - a.seen * 1000) },
+];
 
 export function AdsbPanel(p: Props) {
   const { aircraft, messageRate, selected, onSelect, refLat, refLon } = p;
@@ -72,7 +90,14 @@ export function AdsbPanel(p: Props) {
       )}
 
       {withDist.length > 0 && (
-        <div className="scroll-thin overflow-x-auto">
+        <>
+          <div className="flex items-center justify-between border-b border-border/60 px-3 py-1.5">
+            <span className="text-[11px] text-muted-foreground">
+              {withDist.length} aircraft
+            </span>
+            <ExportButton baseName="adsb" rows={aircraft} columns={ADSB_COLUMNS} />
+          </div>
+          <div className="scroll-thin overflow-x-auto">
           <table className="w-full text-left font-mono text-[11px]">
             <thead className="text-muted-foreground/70">
               <tr className="border-b">
@@ -128,7 +153,8 @@ export function AdsbPanel(p: Props) {
               })}
             </tbody>
           </table>
-        </div>
+          </div>
+        </>
       )}
     </div>
   );
