@@ -1,4 +1,4 @@
-# sdr — web SDR client for RTL-SDR Blog V3
+# A Web-based SDR client
 
 Fullstack TypeScript web SDR receiver. Bun backend manages `rtl_tcp` and does the
 DSP (FFT spectrum + demodulation); React/Tailwind/shadcn frontend renders the
@@ -36,6 +36,12 @@ bun run dev        # starts server (:8787) and web (:5173) together
 ```
 
 Open http://localhost:5173.
+
+<img width="1728" height="994" alt="image" src="https://github.com/user-attachments/assets/4830d3cc-65a9-4111-9509-35cd27e5c957" />
+
+<img width="1728" height="994" alt="image" src="https://github.com/user-attachments/assets/33cf5a06-7d5d-472a-a08b-206d0a805e9d" />
+
+
 
 ## Layout
 
